@@ -154,7 +154,7 @@ pre-agent-steps:
       }
       # BEGIN GENERATED RESOURCE DIGESTS
       check_hash "$install_verifier" "ce387c5f0c9826a91d4132188f67a50e6996b3d4aa996ad0e5ad79dcf8acb132"
-      check_hash "$cast_validator" "bc59bf54cb392aa0ed18d106123a7ab62a780d97e6ce9698421b797f3402f2f0"
+      check_hash "$cast_validator" "15f0d47917d269b5b967dc2a782a0eb761c39af7a92ddb64fed687a427070760"
       check_hash "$bootstrap_validator" "8462546aa0d2efa37a52ea1df9ffa1b1f0cb7df4e4b17a64e98a11f05cb9d449"
       # END GENERATED RESOURCE DIGESTS
       node "$bootstrap_validator" \

@@ -207,7 +207,7 @@ function validateTeamRoleSection(team, heading, name, role, errors) {
   }
   if (name === '@copilot' &&
       (rows[0]?.at(-1) !== '🤖 Coding Agent' ||
-       (team.match(/copilot-auto-assign/g) ?? []).length !== 1 ||
+       (team.match(/copilot-auto-assign/gi) ?? []).length !== 1 ||
        !/^<!-- copilot-auto-assign: false -->$/m.test(section))) {
     errors.push('team: Coding Agent requires status "🤖 Coding Agent" and one standalone <!-- copilot-auto-assign: false --> marker in its section');
   }

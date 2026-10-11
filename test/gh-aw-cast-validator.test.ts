@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { requirePosixShell } from './posix-shell';
 import { readCastingRegistryPair } from '../packages/squad-sdk/src/casting/durable-registry.js';
 import { validateCastingPairFiles } from '../scripts/check-agent-binding.mjs';
-import { hasCopilot, removeCopilotSection, setAutoAssign } from '../packages/squad-cli/src/cli/core/team-md.js';
+import { hasCopilot, insertCopilotSection, removeCopilotSection, setAutoAssign } from '../packages/squad-cli/src/cli/core/team-md.js';
 
 const validator = join(process.cwd(), 'scripts', 'validate-gh-aw-cast.mjs');
 const resourcePath = join(process.cwd(), 'workflows', 'shared', 'squad-cast-validator.mjs');
@@ -1141,6 +1141,9 @@ describe('GH-AW Cast final-tree validator', () => {
     ['inline marker', (team: string) => team.replace('<!-- copilot-auto-assign: false -->', '`copilot-auto-assign: false`')],
     ['enabled marker', (team: string) => team.replace('copilot-auto-assign: false', 'copilot-auto-assign: true')],
     ['duplicate marker', (team: string) => `${team}\n<!-- copilot-auto-assign: true -->\n`],
+    ['uppercase enabled marker', (team: string) => `${team}\n<!-- COPILOT-AUTO-ASSIGN: true -->\n`],
+    ['mixed-case spaced enabled marker', (team: string) => `${team}\n<!--  Copilot-Auto-Assign:\tTRUE   -->\n`],
+    ['multiline enabled marker', (team: string) => `${team}\n<!--\nCOPILOT-AUTO-ASSIGN:\ntrue\n-->\n`],
     ['misplaced marker', (team: string) => `<!-- copilot-auto-assign: false -->\n${team.replace('<!-- copilot-auto-assign: false -->', '')}`],
   ] as const)('rejects generated team with %s', (_label, mutate) => {
     const fixture = createFixture();
@@ -1164,6 +1167,54 @@ describe('GH-AW Cast final-tree validator', () => {
     expect(removed).not.toContain('## Coding Agent');
     expect(removed).toContain('## Coordinator');
     expect(removed).toContain('## Members');
+  });
+
+  it('accepts canonical CLI insertion without changing standalone configuration behavior', () => {
+    const fixture = createFixture();
+    const team = insertCopilotSection(removeCopilotSection(teamMarkdown()));
+    expect(hasCopilot(team)).toBe(true);
+    expect(team).toContain('<!-- copilot-auto-assign: false -->');
+    write(fixture.root, '.squad/team.md', team);
+    const result = validate(fixture.root, fixture.payload);
+    expect(result.status, result.stderr).toBe(0);
+  });
+
+  const assignmentReaders = [
+    ...['templates', '.squad-templates', 'packages/squad-cli/templates', 'packages/squad-sdk/templates', '.github']
+      .flatMap(root => ['squad-triage.yml', 'squad-heartbeat.yml'].map(name => `${root}/workflows/${name}`)),
+    'packages/squad-cli/src/cli/commands/watch/index.ts',
+  ];
+  it.each(assignmentReaders)('keeps generated markers safe for actual reader %s', path => {
+    const source = readFileSync(join(process.cwd(), path), 'utf8');
+    const expression = source.match(/const autoAssign = ([\s\S]*?);/)?.[1];
+    expect(expression).toBeDefined();
+    const readEnabled = compileFunction(`return (${expression});`, ['content', 'fs']);
+    const enabled = (team: string) => readEnabled(team, { readFileSync: () => team });
+    const canonical = teamMarkdown();
+    expect(enabled(canonical)).toBe(false);
+    expect(enabled(setAutoAssign(canonical, true))).toBe(true);
+    expect(enabled(setAutoAssign(setAutoAssign(canonical, true), false))).toBe(false);
+    const fixture = createFixture();
+    for (const marker of [
+      '<!-- copilot-auto-assign: true -->',
+      '<!-- COPILOT-AUTO-ASSIGN: true -->',
+      '<!--  Copilot-Auto-Assign:\tTRUE   -->',
+      '<!--\nCOPILOT-AUTO-ASSIGN:\ntrue\n-->',
+      '<!--copilot-auto-assign:true-->',
+      '<!-- copilot-auto-assign: false -->',
+      '<!-- COPILOT-AUTO-ASSIGN: false -->',
+    ]) {
+      for (const team of [`${canonical}\n${marker}\n`, `${marker}\n${canonical}`]) {
+        const expectedEnabled = path.endsWith('index.ts')
+          ? marker === '<!-- copilot-auto-assign: true -->'
+          : /true/i.test(marker);
+        expect(enabled(team)).toBe(expectedEnabled);
+        write(fixture.root, '.squad/team.md', team);
+        const result = validate(fixture.root, fixture.payload);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain('one standalone <!-- copilot-auto-assign: false -->');
+      }
+    }
   });
 
   it('rejects a Cast tree missing a required built-in charter (materialized directory + payload)', () => {
