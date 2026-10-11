@@ -152,7 +152,7 @@
       "package_destination": ".github/workflows/shared/squad-command-contract.mjs",
       "destination": ".github/workflows/shared/squad-command-contract.mjs",
       "ownership": "manifest",
-      "sha256": "04fc4a578cd87de13964d3e154b6683d9b5851c5713c6fbe183ee5d24ce38aeb"
+      "sha256": "ccef806935f1283f404641d57aeb604021e284ff6a4b6463b7fff271cf8c521c"
     },
     {
       "path": "shared/squad-cast-validator.mjs",

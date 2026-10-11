@@ -1000,6 +1000,25 @@ comment body. This restriction includes HTML comments and quoted/code regions:
 gh-aw preserves HTML comments inside code fences, and lifecycle readers inspect
 the complete posted text rather than its rendered visibility.
 
+This tool-input rule is distinct from serialized output. The pinned gh-aw
+v0.91.5 `add_comment` adapter adds a `temporary_id`; its collector appends the
+`Structured data:` JSON suffix while retaining `data`. The guard accepts only
+a string ID in the adapter's bare `aw_` format (3–12 alphanumeric or underscore
+characters), not other mutation fields. For serialized plan comments, it first
+validates the exact draft-data schema, originating issue, empty phases, and
+allowed artifact kind (`plan`, `program`, `implementation`, or `validation`),
+then requires exactly one terminal envelope semantically equal to that data.
+Missing, malformed, duplicate, mismatching, or extra-field envelopes fail
+closed. All remaining prose still receives the full body check. The envelope
+and `data` are preserved for downstream planning readers, not stripped from
+the output. Neither metadata nor markers grant authority.
+
+Raw Markdown-only comments without serializer metadata remain valid, with an
+optional independently validated plan `data` field. Do not hand-author the
+serialized suffix or rely on a `temporary_id` to authorize a comment. Custom
+research and lifecycle tools continue to accept only their declared Markdown
+body; they do not gain this built-in comment serialization exception.
+
 The guard validates the entire emitted batch before the built-in handlers run.
 Research/lifecycle custom jobs and terminal lifecycle repair require a successful
 safe-output job. The command router permits no agent-authored mutations; only

@@ -2,6 +2,7 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 
 const NO_ARGUMENT_COMMANDS = new Map([
   ['cast', 'cast'],
@@ -333,6 +334,24 @@ export async function authorizeSquadCommand({ payload, eventName, actor, resolve
   }
 }
 
+function serializedPlanBody(body, data) {
+  // gh-aw v0.91.5 appends this suffix in safe_output_type_validator.cjs.
+  // Validate, rather than rewrite, so the writer retains the planning artifact.
+  const match = /(?:^|\n\n)Structured data:\n```json\n([\s\S]*?)\n```$/.exec(body);
+  let envelope;
+  try {
+    envelope = match && JSON.parse(match[1]);
+  } catch {
+    // Malformed data is rejected along with missing or mismatching envelopes.
+  }
+  if (!match || !isDeepStrictEqual(envelope, data) ||
+      // Draft data has exactly four flat properties; reject duplicate JSON keys.
+      (match[1].match(/"(?:[^"\\]|\\.)*"\s*:/g) || []).length !== 4) {
+    throw new Error('Squad serialized plan comment requires one matching structured data envelope.');
+  }
+  return body.slice(0, match.index);
+}
+
 function validateOpenModeOutputs(result, payload, items) {
   const issueNumber = Number(result.source === 'workflow_dispatch'
     ? payload?.inputs?.issue_number : payload?.issue?.number);
@@ -348,7 +367,7 @@ function validateOpenModeOutputs(result, payload, items) {
       throw new Error('Squad open-mode output requires a valid originating issue.');
     }
     const keys = item.type === 'add_comment'
-      ? ['type', 'body', 'item_number', 'data']
+      ? ['type', 'body', 'item_number', 'data', 'temporary_id']
       : ['type', 'body'];
     if (Object.keys(item).some(key => !keys.includes(key))) {
       throw new Error('Squad open-mode output contains unsupported mutation fields.');
@@ -357,21 +376,30 @@ function validateOpenModeOutputs(result, payload, items) {
         String(item.item_number) !== String(issueNumber)) {
       throw new Error('Squad open-mode comments must target the originating issue.');
     }
-    // Inspect the complete body: gh-aw preserves HTML comments in code regions,
-    // and downstream lifecycle readers parse their envelopes as ordinary text.
-    if (typeof item.body !== 'string' ||
-        /structured\s+data\s*:|[`~]{3,}\s*json|"squad_artifact"\s*:/i.test(item.body)) {
-      throw new Error('Squad open-mode body must not supply a structured artifact envelope.');
+    const serializedComment = Object.hasOwn(item, 'temporary_id');
+    // The pinned add_comment adapter emits bare IDs: generated eight-character
+    // IDs or normalized caller IDs accepted by temporary_id.cjs (3–12 characters).
+    if (serializedComment && (typeof item.temporary_id !== 'string' ||
+        !/^aw_[A-Za-z0-9_]{3,12}$/.test(item.temporary_id))) {
+      throw new Error('Squad open-mode comment has invalid serializer metadata.');
     }
     if (item.data !== undefined) {
       const data = item.data;
-      if (result.mode !== 'plan' || !data || typeof data !== 'object' ||
+      if (result.mode !== 'plan' || !data || typeof data !== 'object' || Array.isArray(data) ||
           Object.keys(data).sort().join(',') !== 'origin_issue,phases,schema_version,squad_artifact' ||
           !['plan', 'program', 'implementation', 'validation'].includes(data.squad_artifact) ||
           data.schema_version !== '1' || data.origin_issue !== issueNumber ||
           !Array.isArray(data.phases) || data.phases.length !== 0) {
         throw new Error('Squad open mode cannot emit acceptance, activation, or unrelated artifacts.');
       }
+    }
+    // Inspect all prose, including hidden/code regions. Only a serializer suffix
+    // matching separately validated draft data is exempt; metadata grants no authority.
+    const body = typeof item.body === 'string' && serializedComment && item.data !== undefined
+      ? serializedPlanBody(normalizeNewlines(item.body), item.data) : item.body;
+    if (typeof body !== 'string' ||
+        /structured\s+data\s*:|[`~]{3,}\s*json|"squad_artifact"\s*:/i.test(body)) {
+      throw new Error('Squad open-mode body must not supply a structured artifact envelope.');
     }
     if (item.type === 'upsert_lifecycle_state') {
       const expected = result.mode === 'research' ? 'Researched' : 'Planned';
