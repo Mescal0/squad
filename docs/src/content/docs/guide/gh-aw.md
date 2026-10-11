@@ -226,13 +226,37 @@ under Profile B, opens the Cast PR directly:
 - a draft Cast PR on `squad/bootstrap-cast` (opened automatically under
   Profile B, or by you from the fallback issue's compare URL under Profile A);
   and
-- `[Research Proposals] Agent-discovered repo opportunities` — **not**
+- `[Agentic Research] owner/repo — initial proposals` — **not**
   created by this run under Profile A. No automatic trigger re-runs
   `squad-bootstrap` when you open or merge the fallback-issue PR, so after you
   open (or merge) the Cast PR you must manually dispatch **Squad Bootstrap**
   again (**Actions → Squad Bootstrap → Run workflow**). That rerun
   deterministically detects the Cast PR, whether still open or already merged,
   and creates the linked research-proposals issue at that point.
+
+The shared issue category is **Agentic Research**; the subject names the scope.
+Native bootstrap uses the runtime `owner/repo`, not a configured farm display
+name, and appends the exact `[reset:<id>]` suffix for a committed reset.
+Bootstrap proposes opportunities; it does not claim to have completed research.
+For a separately initiated later research wave, a title such as
+`[Agentic Research] owner/example — 2026-10-12` distinguishes the subject and date.
+That example does not schedule or create waves, rename existing issues, or change
+`/squad research` artifact replacement behavior. A farm name, when relevant to a manually
+created research issue, belongs in its subject, not the shared category.
+
+**Existing installations:** update and verify the complete package from one
+approved immutable revision before renaming a bootstrap issue. Older validators
+require the legacy title `[Research Proposals] Agent-discovered repo opportunities`
+(plus its reset suffix) even after the Cast PR is merged. The updated validator
+accepts either that exact legacy title or the exact repository-scoped new title,
+with the same generation suffix and exactly one durable bootstrap marker.
+New-title recognition additionally requires the original GitHub Actions bot
+author. It does not authorize an arbitrary subject, another repository, or a
+date-based bootstrap title. Existing completed bootstrap remains a no-op and
+does not rename the issue automatically. After the compatible update lands, a
+maintainer may make a title-only rename to the exact new title; leave the body,
+research comments, Cast branch, and provenance untouched. Validated partial
+recovery writes the new title when it already needs to update the proposal issue.
 
 Bootstrap submits the shared payload through one authenticated command. Runtime
 code assembles and validates its bounded chunks, then passes JSON directly to
