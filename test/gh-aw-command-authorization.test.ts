@@ -41,11 +41,13 @@ const payloadFor = (command: string, eventName = 'issue_comment') => ({
 });
 let dispatcher: Lock;
 let router: Lock;
+let installedDispatcher: string;
 let sanitizeContent: (body: string, options?: { allowedAliases: string[] }) => string;
 let diagnosticSources: Map<string, string>;
 
 beforeAll(async () => {
   const fixture = createFirstInstallFixture('a'.repeat(40), 'package');
+  installedDispatcher = fixture.consumerFiles.get('.github/workflows/squad.md')!.toString();
   dispatcher = parse(fixture.consumerFiles.get('.github/workflows/squad.lock.yml')!.toString());
   router = parse(fixture.consumerFiles.get('.github/workflows/squad-command-router.lock.yml')!.toString());
   // Execute the actual sanitizer dependency closure at the compiled action pin,
@@ -149,6 +151,43 @@ async function interpretLifecycleComment(body?: string) {
     { env: { ISSUE_NUMBER: '42', SQUAD_EVENT_NAME: 'workflow_dispatch', SQUAD_COMMAND: 'plan accept' } });
   expect(failures).toEqual([]);
   return mutations;
+}
+
+function lifecycleFromTemplate(source: string, mode: 'research' | 'plan') {
+  const template = source.replace(/\r\n/g, '\n')
+    .match(/```(?:markdown)?\n(## Planning Lifecycle\n[\s\S]*?)\n```/)?.[1];
+  expect(template).toBeTruthy();
+  return template!
+    .replace('**Current state:** Triaged', `**Current state:** ${mode === 'research' ? 'Researched' : 'Planned'}`)
+    .replace('**Last command:** `/squad triage`', `**Last command:** \`/squad ${mode}\``)
+    .replace('**Next action:** `/squad plan program`',
+      `**Next action:** \`/squad ${mode === 'research' ? 'triage' : 'plan validate'}\``)
+    .replaceAll('@user', '@contributor')
+    .replaceAll('<timestamp>', '2026-01-01T00:00:00Z')
+    .replaceAll('<date>', '2026-01-01')
+    .replaceAll('<comment link>', 'Artifact comment');
+}
+
+async function writeLifecycle(body: string) {
+  const job = dispatcher.jobs.upsert_lifecycle_state;
+  expect(job.if).toContain("needs.safe_outputs.result == 'success'");
+  const step = job.steps.find(candidate => candidate.name === 'Upsert Squad lifecycle state')!;
+  const writes: Record<string, unknown>[] = [];
+  const failures: string[] = [];
+  writeFileSync(outputPath, JSON.stringify({ items: [{ type: 'upsert_lifecycle_state', body }] }));
+  await compileFunction(`return (async () => { ${step.with!.script} })();`,
+    ['github', 'context', 'core', 'process'],
+    { importModuleDynamically: constants.USE_MAIN_CONTEXT_DEFAULT_LOADER })({
+    paginate: async () => [],
+    rest: { issues: {
+      listComments: vi.fn(),
+      createComment: async (params: Record<string, unknown>) => writes.push(params),
+      updateComment: async (params: Record<string, unknown>) => writes.push(params),
+    } },
+  }, { repo: { owner: 'owner', repo: 'repo' } },
+  { setFailed: (message: string) => failures.push(message) },
+  { env: { GH_AW_AGENT_OUTPUT: outputPath, ISSUE_NUMBER: '42' } });
+  return { writes, failures };
 }
 
 describe('compiled Squad command authorization boundary (#2185)', () => {
@@ -380,21 +419,108 @@ describe('compiled Squad command authorization boundary (#2185)', () => {
     }
   });
 
-  it('permits research/plan artifacts and only their nonterminal lifecycle states', async () => {
-    for (const mode of ['research', 'plan']) {
-      const item = mode === 'research'
-        ? { type: 'upsert_research_artifact', body: '## Squad Research\nResearch content' }
-        : { type: 'add_comment', body: '## Plan', data: {
-          squad_artifact: 'plan', schema_version: '1', origin_issue: 42, phases: [],
-        } };
-      const lifecycle = { type: 'upsert_lifecycle_state',
-        body: `## Squad Lifecycle\n- **State:** ${mode === 'research' ? 'Researched' : 'Planned'}\n- **Last command:** \`/squad ${mode}\`\n- **Next action:** \`/squad triage\`` };
-      expect((await runGuard({ payload: payloadFor(mode), permission: 'read', items: [item, lifecycle] })).failures).toEqual([]);
-      expect((await runGuard({ payload: payloadFor(mode), items: [
-        { ...lifecycle, body: lifecycle.body.replace(/Researched|Planned/, 'Activated') },
-      ] })).failures).toHaveLength(1);
+  it.each(['research', 'plan'] as const)('permits template-derived %s batches through the guard and writer', async mode => {
+    const item = mode === 'research'
+      ? { type: 'upsert_research_artifact', body: '## Squad Research\nResearch content' }
+      : { type: 'add_comment', body: '## Plan', data: {
+        squad_artifact: 'plan', schema_version: '1', origin_issue: 42, phases: [],
+      } };
+    for (const source of [
+      readFileSync(join(root, 'workflows/shared/squad-planning-ontology.md'), 'utf8'),
+      installedDispatcher,
+      readFileSync(join(root, 'docs/src/content/docs/guide/gh-aw.md'), 'utf8'),
+    ]) {
+      const body = lifecycleFromTemplate(source, mode);
+      const lifecycle = { type: 'upsert_lifecycle_state', body };
+      const result = await runGuard({ payload: payloadFor(mode), permission: 'read', items: [item, lifecycle] });
+      expect(result.failures).toEqual([]);
+      expect(result.permissionLookup).not.toHaveBeenCalled();
+      const written = await writeLifecycle(body);
+      expect(written.failures).toEqual([]);
+      expect(written.writes).toHaveLength(1);
+      expect(written.writes[0].body).toBe(`${body}\n\nStructured data:\n\n\`\`\`json\n${JSON.stringify({
+        squad_artifact: 'lifecycle-state', schema_version: '1', origin_issue: 42, phases: [],
+      })}\n\`\`\``);
+      const commandLine = `**Last command:** \`/squad ${mode}\``;
+      for (const invalid of [
+        body.replace(/Researched|Planned/, 'Activated'),
+        body.replace(/Researched|Planned/, 'ScopeAccepted'),
+        body.replace(/Researched|Planned/, mode === 'research' ? 'Planned' : 'Researched'),
+        body.replace(commandLine, '**Last command:** `/squad activate`'),
+        body.replace(commandLine, `${commandLine} by @contributor at 2026-01-01T00:00:00Z`),
+        body.replace(commandLine, ''),
+        `${body}\n${commandLine}`,
+        `${body}\n- ${commandLine}`,
+        `${body}\n**State:** Activated`,
+      ]) {
+        const denied = await runGuard({ payload: payloadFor(mode), permission: 'read',
+          items: [item, { ...lifecycle, body: invalid }] });
+        expect(denied.failures).toHaveLength(1);
+        expect(denied.failures[0]).toContain('open-mode lifecycle');
+        expect(denied.mutations).toEqual([]);
+      }
     }
   });
+
+  it('emits the lifecycle source import and strict tool contract in the compiled artifact', () => {
+    const compiled = JSON.stringify(dispatcher);
+    expect(compiled).toContain('{{#runtime-import .github/workflows/squad.md}}');
+    expect(installedDispatcher).toContain('**Last command:** `/squad triage`\n**Updated by:** @user at <timestamp>');
+    expect(compiled).toContain('Include exactly one last-command field containing only the backticked /squad command');
+    expect(installedDispatcher).not.toContain('**Last command:** `/squad triage` by @user');
+  });
+
+  it('rejects both open-mode batches when the live template regains its original attribution suffix', async () => {
+    const fixture = createFirstInstallFixture('a'.repeat(40), 'package');
+    const mutationRoot = join(scratch, 'lifecycle-template-mutant');
+    for (const [path, bytes] of fixture.consumerFiles) {
+      const destination = join(mutationRoot, path);
+      mkdirSync(dirname(destination), { recursive: true });
+      writeFileSync(destination, bytes);
+    }
+    const sourcePath = join(mutationRoot, '.github/workflows/squad.md');
+    const original = readFileSync(sourcePath, 'utf8');
+    const mutant = original.replace(
+      '**Last command:** `/squad triage`\n**Updated by:** @user at <timestamp>',
+      '**Last command:** `/squad triage` by @user at <timestamp>',
+    );
+    expect(mutant).not.toBe(original);
+    writeFileSync(sourcePath, mutant);
+    execFileSync('git', ['init', '--quiet'], { cwd: mutationRoot });
+    compileWithPinnedActions(mutationRoot);
+    const lock = readFileSync(join(mutationRoot, '.github/workflows/squad.lock.yml'), 'utf8');
+    expect(lock).toContain('{{#runtime-import .github/workflows/squad.md}}');
+    expect(readFileSync(sourcePath, 'utf8'))
+      .toContain('**Last command:** `/squad triage` by @user at <timestamp>');
+    const realDispatcher = dispatcher;
+    try {
+      dispatcher = parse(lock);
+      for (const mode of ['research', 'plan'] as const) {
+        const artifact = mode === 'research'
+          ? { type: 'upsert_research_artifact', body: '## Squad Research\nResearch content' }
+          : { type: 'add_comment', body: '## Plan', data: {
+            squad_artifact: 'plan', schema_version: '1', origin_issue: 42, phases: [],
+          } };
+        const check = async (source: string) => runGuard({
+          payload: payloadFor(mode), permission: 'read', items: [
+            artifact, { type: 'upsert_lifecycle_state', body: lifecycleFromTemplate(source, mode) },
+          ],
+        });
+        const assertAccepted = (result: Awaited<ReturnType<typeof runGuard>>) => {
+          expect(result.failures).toEqual([]);
+        };
+        assertAccepted(await check(original));
+        const denied = await check(readFileSync(sourcePath, 'utf8'));
+        expect(() => assertAccepted(denied)).toThrow();
+        expect(denied.failures).toEqual([
+          'Squad open-mode lifecycle must describe only the requested research or plan.',
+        ]);
+        expect(denied.mutations).toEqual([]);
+      }
+    } finally {
+      dispatcher = realDispatcher;
+    }
+  }, 120_000);
 
   it.each([
     ['tilde fence', '~~~~text', '~~~~', '\n'],

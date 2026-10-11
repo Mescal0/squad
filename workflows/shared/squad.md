@@ -188,7 +188,7 @@ safe-outputs:
       output: Lifecycle state updated.
       inputs:
         body:
-          description: Complete lifecycle Markdown with an H2 lifecycle heading plus state, last-command, and next-action fields. For a nonterminal state, the next-action value must consist of a backticked /squad command; put explanatory prose in a separate field. Structured data is normalized by the writer.
+          description: Lifecycle Markdown with an H2 lifecycle heading, state, last-command, and next-action fields. Include exactly one last-command field containing only the backticked /squad command requested; put optional actor/time attribution on a separate Updated by line. For nonterminal states, next-action must contain only a backticked /squad command; put explanatory prose in a separate field. The writer normalizes structured data.
           required: true
           type: string
       steps:

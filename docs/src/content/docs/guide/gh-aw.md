@@ -1377,12 +1377,22 @@ Each step is user-initiated — Squad proposes, you review and approve.
 After each command, Squad posts (or updates) a **lifecycle state comment** on the
 issue. This comment shows where you are, what just happened, and what to do next:
 
-```
+```markdown
+## Planning Lifecycle
+
 **Current state:** Triaged
-**Last command:** `/squad triage` by @user at 2026-08-10
-**Next action:** `/squad plan program` — create a program plan from triage dispositions
+**Last command:** `/squad triage`
+**Updated by:** @user at 2026-08-10
+**Next action:** `/squad plan program`
+**Guidance:** Create a program plan from triage dispositions.
 **Also available:** `/squad triage revise <feedback>` — adjust triage before planning
 ```
+
+Use exactly one `Last command` field with only the requested backticked command.
+Keep actor/time attribution on the separate `Updated by` line. Open research and
+plan commands report `Researched` and `Planned`, respectively, never acceptance
+or activation. For nonterminal states, `Next action` is also command-only; use
+`Guidance` for explanatory prose.
 
 The `Next action` field tells you (or any agent reading the issue) the primary
 next command. `Also available` shows alternative valid commands at this point in
