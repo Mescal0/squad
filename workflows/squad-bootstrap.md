@@ -161,7 +161,7 @@ pre-agent-steps:
       }
       # BEGIN GENERATED RESOURCE DIGESTS
       check_hash "$install_verifier" "ce387c5f0c9826a91d4132188f67a50e6996b3d4aa996ad0e5ad79dcf8acb132"
-      check_hash "$cast_validator" "c6d0b92aac71dc6f6d5727cac418a323b0bc9c12047400faa12d96150d548ada"
+      check_hash "$cast_validator" "15f0d47917d269b5b967dc2a782a0eb761c39af7a92ddb64fed687a427070760"
       check_hash "$bootstrap_validator" "8462546aa0d2efa37a52ea1df9ffa1b1f0cb7df4e4b17a64e98a11f05cb9d449"
       # END GENERATED RESOURCE DIGESTS
       node "$bootstrap_validator" \
@@ -788,7 +788,15 @@ Generate the same final tree and formats as `/squad cast`:
 The registry contains active specialists only. The routing table uses the exact
 header `Work Type | Route To | Examples` and exact active `persistent_name`
 values. The team has separate `## Members` and `## Built-in Support Agents`
-sections. The coordinator has concrete Cast-source paths and one synchronized,
+sections. Also include exactly one `## Coordinator` section with a table row
+whose Name is `Squad` and Role is `Coordinator`, and exactly one `## Coding Agent`
+section with a table row whose Name is `@copilot`, Role is `Coding Agent`, and
+final Status cell is exactly `🤖 Coding Agent` (the native CLI detection marker).
+Keep both out of `## Members`. Inside `## Coding Agent`, emit exactly one
+standalone line `<!-- copilot-auto-assign: false -->` (without backticks in the
+file), not an inline table annotation. These sections and the disabled marker
+are validated before the Cast can be published.
+The coordinator has concrete Cast-source paths and one synchronized,
 nonzero Team Capabilities block. Remove bootstrap specialist directories not
 selected by this Cast, but never remove or rewrite the four built-ins.
 

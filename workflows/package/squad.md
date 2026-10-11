@@ -872,7 +872,7 @@ pre-agent-steps:
       validator_script="$(cd "$(dirname "$validator_script")" && pwd -P)/$(basename "$validator_script")"
 
       # BEGIN GENERATED RESOURCE DIGEST
-      validator_expected_sha256="c6d0b92aac71dc6f6d5727cac418a323b0bc9c12047400faa12d96150d548ada"
+      validator_expected_sha256="15f0d47917d269b5b967dc2a782a0eb761c39af7a92ddb64fed687a427070760"
       # END GENERATED RESOURCE DIGEST
       : > "$stderr_file"
       validator_actual_sha256="$(
@@ -2098,6 +2098,14 @@ mandatory support agents, separate from selected Cast specialists.
 Create/replace:
 
 1. **`.squad/team.md`** — Roster table containing only Coordinator (Squad), active registry Members (Name|Role|Charter path|Status), and Coding Agent (@copilot with `copilot-auto-assign: false`). Every charter path must be a concrete active-member path created by this Cast. Do not add the four built-ins as Members rows or charter references there. Instead, add one dedicated `## Built-in Support Agents` section (separate from `## Members`) that lists exactly the four required built-ins — Scribe, Ralph, Rai, Fact Checker — each with its concrete canonical charter path (`.squad/agents/scribe/charter.md`, `.squad/agents/ralph/charter.md`, `.squad/agents/rai/charter.md`, `.squad/agents/fact-checker/charter.md`) and a one-line note that they are mandatory support agents, not Cast specialists and not routing destinations.
+   Use exactly one `## Coordinator` section with a table row whose Name is `Squad`
+   and Role is `Coordinator`, and exactly one `## Coding Agent` section with a
+   table row whose Name is `@copilot`, Role is `Coding Agent`, and final Status
+   cell is exactly `🤖 Coding Agent` (the native CLI detection marker). Keep both out of
+   `## Members`. Inside `## Coding Agent`, emit exactly one standalone line
+   `<!-- copilot-auto-assign: false -->` (without backticks in the file), not an
+   inline table annotation. These sections and the disabled marker are validated
+   before the Cast can be published.
 2. **`.squad/agents/{id}/charter.md`** — Per selected specialist only: `# Name — Role`, Identity block (name, role, expertise, style), "What I Own", Boundaries (handle/don't), Model: auto. Never write, overwrite, or reinterpret `.squad/agents/scribe/charter.md`, `.squad/agents/ralph/charter.md`, `.squad/agents/rai/charter.md`, or `.squad/agents/fact-checker/charter.md` — those are the verbatim materialized resources from the prior deterministic step.
 3. **`.squad/routing.md`** — Completely replace the file. It must contain exactly one `## Routing Table` section, using section heading `## Routing Table` and exact headers `Work Type | Route To | Examples`; every `Route To` value is an exact active casting-registry `persistent_name`, with multiple names comma-separated and no prose or annotations. No `## Work Type → Agent` section or other legacy routing section may remain anywhere in the file. Do not route to the four built-ins or any other inactive/support role.
 4. **`.squad/casting/registry.json`** — From Step 3. Specialist entries only; never add scribe, ralph, rai, or fact-checker.
