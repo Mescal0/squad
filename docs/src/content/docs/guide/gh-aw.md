@@ -266,7 +266,8 @@ Signed Cast provenance binds the exact generated head commit (`cast_sha`).
 Before publication, the Cast validator requires separate `## Coordinator`
 (`Squad` / `Coordinator`) and `## Coding Agent` (`@copilot` / `Coding Agent`)
 table sections in `team.md`, outside the specialist `## Members` roster. The
-Coding Agent section must contain exactly one standalone
+Coding Agent row must end with Status `🤖 Coding Agent`, which the native CLI
+uses to recognize that the section already exists. Its section must contain exactly one standalone
 `<!-- copilot-auto-assign: false -->` line. Inline prose is not the native
 configuration marker; automatic assignment remains disabled.
 

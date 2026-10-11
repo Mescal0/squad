@@ -153,7 +153,7 @@ pre-agent-steps:
       validator_script="$(cd "$(dirname "$validator_script")" && pwd -P)/$(basename "$validator_script")"
 
       # BEGIN GENERATED RESOURCE DIGEST
-      validator_expected_sha256="7d9797a79d4e2be8d596faf79d2bd6b4fb8724babe807721c472b1a0cd3b67e6"
+      validator_expected_sha256="bc59bf54cb392aa0ed18d106123a7ab62a780d97e6ce9698421b797f3402f2f0"
       # END GENERATED RESOURCE DIGEST
       : > "$stderr_file"
       validator_actual_sha256="$(
@@ -974,7 +974,8 @@ Create/replace:
 1. **`.squad/team.md`** — Roster table containing only Coordinator (Squad), active registry Members (Name|Role|Charter path|Status), and Coding Agent (@copilot with `copilot-auto-assign: false`). Every charter path must be a concrete active-member path created by this Cast. Do not add the four built-ins as Members rows or charter references there. Instead, add one dedicated `## Built-in Support Agents` section (separate from `## Members`) that lists exactly the four required built-ins — Scribe, Ralph, Rai, Fact Checker — each with its concrete canonical charter path (`.squad/agents/scribe/charter.md`, `.squad/agents/ralph/charter.md`, `.squad/agents/rai/charter.md`, `.squad/agents/fact-checker/charter.md`) and a one-line note that they are mandatory support agents, not Cast specialists and not routing destinations.
    Use exactly one `## Coordinator` section with a table row whose Name is `Squad`
    and Role is `Coordinator`, and exactly one `## Coding Agent` section with a
-   table row whose Name is `@copilot` and Role is `Coding Agent`. Keep both out of
+   table row whose Name is `@copilot`, Role is `Coding Agent`, and final Status
+   cell is exactly `🤖 Coding Agent` (the native CLI detection marker). Keep both out of
    `## Members`. Inside `## Coding Agent`, emit exactly one standalone line
    `<!-- copilot-auto-assign: false -->` (without backticks in the file), not an
    inline table annotation. These sections and the disabled marker are validated

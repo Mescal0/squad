@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { requirePosixShell } from './posix-shell';
 import { readCastingRegistryPair } from '../packages/squad-sdk/src/casting/durable-registry.js';
 import { validateCastingPairFiles } from '../scripts/check-agent-binding.mjs';
+import { hasCopilot, removeCopilotSection, setAutoAssign } from '../packages/squad-cli/src/cli/core/team-md.js';
 
 const validator = join(process.cwd(), 'scripts', 'validate-gh-aw-cast.mjs');
 const resourcePath = join(process.cwd(), 'workflows', 'shared', 'squad-cast-validator.mjs');
@@ -102,7 +103,7 @@ ${builtins.map(({ id, name }) => `| ${name} | Built-in | \`.squad/agents/${id}/c
 
 | Name | Role | Status |
 | --- | --- | --- |
-| @copilot | Coding Agent | Available |
+| @copilot | Coding Agent | 🤖 Coding Agent |
 `;
 }
 
@@ -1136,6 +1137,7 @@ describe('GH-AW Cast final-tree validator', () => {
     ['missing coding section', (team: string) => team.replace(/## Coding Agent\n[\s\S]*/, '')],
     ['coding agent in members', (team: string) => team.replace('## Members\n', '## Members\n\n| @copilot | Coding Agent | Available |\n')],
     ['wrong coding agent', (team: string) => team.replace('| @copilot | Coding Agent |', '| Builder | Coding Agent |')],
+    ['unrecognized coding status', (team: string) => team.replace('🤖 Coding Agent', 'Available')],
     ['inline marker', (team: string) => team.replace('<!-- copilot-auto-assign: false -->', '`copilot-auto-assign: false`')],
     ['enabled marker', (team: string) => team.replace('copilot-auto-assign: false', 'copilot-auto-assign: true')],
     ['duplicate marker', (team: string) => `${team}\n<!-- copilot-auto-assign: true -->\n`],
@@ -1146,6 +1148,22 @@ describe('GH-AW Cast final-tree validator', () => {
     const result = validate(fixture.root, fixture.payload);
     expect(result.status).toBe(1);
     expect(result.stderr).toMatch(/team:.*(?:Coordinator|Coding Agent|copilot-auto-assign)/);
+  });
+
+  it('publishes a Coding Agent section recognized and editable by the existing CLI', () => {
+    const fixture = createFixture();
+    const result = validate(fixture.root, fixture.payload);
+    expect(result.status, result.stderr).toBe(0);
+    const team = readFileSync(join(fixture.root, '.squad/team.md'), 'utf8');
+    expect(hasCopilot(team)).toBe(true);
+    const enabled = setAutoAssign(team, true);
+    expect(enabled).toContain('<!-- copilot-auto-assign: true -->');
+    expect(setAutoAssign(enabled, false)).toBe(team);
+    const removed = removeCopilotSection(team);
+    expect(hasCopilot(removed)).toBe(false);
+    expect(removed).not.toContain('## Coding Agent');
+    expect(removed).toContain('## Coordinator');
+    expect(removed).toContain('## Members');
   });
 
   it('rejects a Cast tree missing a required built-in charter (materialized directory + payload)', () => {

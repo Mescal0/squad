@@ -211,7 +211,7 @@ ${builtins.map(({ id, name }) => `| ${name} | Built-in | \`.squad/agents/${id}/c
 
 | Name | Role | Status |
 | --- | --- | --- |
-| @copilot | Coding Agent | Available |
+| @copilot | Coding Agent | 🤖 Coding Agent |
 `;
 }
 
