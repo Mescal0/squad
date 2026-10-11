@@ -155,7 +155,7 @@ pre-agent-steps:
       # BEGIN GENERATED RESOURCE DIGESTS
       check_hash "$install_verifier" "ce387c5f0c9826a91d4132188f67a50e6996b3d4aa996ad0e5ad79dcf8acb132"
       check_hash "$cast_validator" "15f0d47917d269b5b967dc2a782a0eb761c39af7a92ddb64fed687a427070760"
-      check_hash "$bootstrap_validator" "8462546aa0d2efa37a52ea1df9ffa1b1f0cb7df4e4b17a64e98a11f05cb9d449"
+      check_hash "$bootstrap_validator" "d552d041f006249bfaa67b10a75877f813796b7698c718ac7eb7cf16f3a72e31"
       # END GENERATED RESOURCE DIGESTS
       node "$bootstrap_validator" \
         --encode-payload "${GITHUB_WORKSPACE:?}/.github/workflows/squad-bootstrap-payload.json" \
@@ -267,7 +267,9 @@ safe-outputs:
                 '.github/workflows/shared/squad-bootstrap-validator.mjs',
               )).href);
               const reset = bootstrapModule.readBootstrapReset(checkout);
-              const stateModule = { ...bootstrapModule, ...bootstrapModule.bootstrapIdentity(reset) };
+              const stateModule = { ...bootstrapModule, ...bootstrapModule.bootstrapIdentity(
+                reset, process.env.SQUAD_BOOTSTRAP_REPOSITORY,
+              ) };
               const resetAuthorized = await stateModule.authorizeBootstrapReset({
                 reset, input: process.env.SQUAD_BOOTSTRAP_FRESH_START, context, github,
               });
@@ -822,10 +824,13 @@ workflow; use documented `/squad` commands with their prerequisites.
 
 Write `.github/workflows/squad-bootstrap-payload.json` with this exact shape:
 
-For a committed reset, use the exact `identity.BOOTSTRAP_BRANCH`,
+Always use the exact `identity.BOOTSTRAP_BRANCH`,
 `identity.BOOTSTRAP_PR_TITLE`, and `identity.BOOTSTRAP_ISSUE_TITLE` from the
-deterministic state file instead of the legacy values shown below. The writer
-and validator independently load this identity from committed Git history;
+deterministic state file. The research issue category is `Agentic Research`;
+its subject uses the runtime `owner/repo` scope and says `initial proposals`,
+not completed research. There is no farm display-name configuration. The writer
+and validator independently derive the repository scope from runtime metadata
+and any reset suffix from committed Git history;
 never choose or edit the reset ID, record, archived numbers, or output names.
 
 ```json
@@ -836,7 +841,7 @@ never choose or edit the reset ID, record, archived numbers, or output names.
   "branch": "squad/bootstrap-cast",
   "pr_title": "[squad] Cast your Squad",
   "pr_body": "complete Cast summary",
-  "issue_title": "[Research Proposals] Agent-discovered repo opportunities",
+  "issue_title": "[Agentic Research] ${{ github.repository }} — initial proposals",
   "issue_body": "complete issue body",
   "files": [
     {

@@ -764,7 +764,10 @@ on:
         description: Issue number to implement when run manually
         required: false
         type: string
-if: github.event_name != 'issues' || github.actor != 'github-actions[bot]' || github.event.issue.title != '[Research Proposals] Agent-discovered repo opportunities' || !contains(github.event.issue.body, '<!-- squad:bootstrap-opportunities schema=1 -->')
+if: |-
+  github.event_name != 'issues' || github.actor != 'github-actions[bot]' || !(startsWith(github.event.issue.title, '[Research Proposals] Agent-discovered repo opportunities') ||
+    startsWith(github.event.issue.title, format('[Agentic Research] {0} — initial proposals', github.repository))) ||
+  !contains(github.event.issue.body, '<!-- squad:bootstrap-opportunities schema=1 -->')
 permissions:
   actions: read
   contents: read
