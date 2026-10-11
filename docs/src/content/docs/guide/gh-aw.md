@@ -239,9 +239,9 @@ Native bootstrap uses the runtime `owner/repo`, not a configured farm display
 name, and appends the exact `[reset:<id>]` suffix for a committed reset.
 Bootstrap proposes opportunities; it does not claim to have completed research.
 For a separately initiated later research wave, a title such as
-`[Agentic Research] octo/example — 2026-10-12` distinguishes the subject and date.
+`[Agentic Research] owner/example — 2026-10-12` distinguishes the subject and date.
 That example does not schedule or create waves, rename existing issues, or change
-`/squad research` artifact upserts. A farm name, when relevant to a manually
+`/squad research` artifact replacement behavior. A farm name, when relevant to a manually
 created research issue, belongs in its subject, not the shared category.
 
 **Existing installations:** update and verify the complete package from one
