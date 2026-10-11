@@ -402,11 +402,16 @@ This comment is created on first transition and updated on every subsequent tran
 | Activated | ⬚ Pending | — | — |
 
 **Current state:** Triaged
-**Last command:** `/squad triage` by @user at <timestamp>
+**Last command:** `/squad triage`
+**Updated by:** @user at <timestamp>
 **Next action:** `/squad plan program`
 **Guidance:** Create a program plan from triage dispositions.
 **Also available:** `/squad triage revise <feedback>` — adjust triage before planning
 ```
+
+Use exactly one `Last command`, containing only the requested backticked command.
+Keep actor/time attribution on `Updated by`. Open research/plan commands use
+`Researched`/`Planned`, never acceptance or activation.
 
 For nonterminal states, `Next action` is only the backticked `/squad` command;
 put prose elsewhere. `Activated` is terminal and may use terminal prose there.
