@@ -623,6 +623,9 @@ describe('automatic Squad bootstrap workflow', () => {
       expect(normalized).toContain('bare `squad` label is a tracking marker');
       expect(normalized).toContain('A name mention alone does not dispatch a native workflow');
       expect(source).not.toContain('Scribe logs sessions');
+      expect(normalized).toContain('exactly one `## Coordinator` section');
+      expect(normalized).toContain('exactly one `## Coding Agent`');
+      expect(normalized).toContain('copilot-auto-assign: false');
     }
     const guide = readFileSync(resolve(ROOT, 'docs/src/content/docs/guide/gh-aw.md'), 'utf8');
     expect(guide).toContain('Do not amend that branch or rewrite provenance');
@@ -1014,6 +1017,20 @@ describe('automatic Squad bootstrap workflow', () => {
     expect(unavailable.stdout).toBe('');
   });
 
+  it.each(['Coordinator', 'Coding Agent'])('refuses a generated Cast missing %s before tool submission', heading => {
+    const fixture = submissionFixture();
+    const team = fixture.payload.files.find(file => file.path === '.squad/team.md')!;
+    team.content = team.content.replace(new RegExp(`## ${heading}\\n[\\s\\S]*?(?=\\n## |$)`), '');
+    write(fixture.root, team.path, team.content);
+    const text = JSON.stringify(fixture.payload);
+    writeFileSync(fixture.payloadPath, text);
+    writeFileSync(fixture.envelopePath, JSON.stringify(createBootstrapPayloadEnvelope(text)));
+    const result = fixture.submit();
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(`expected exactly one "## ${heading}" heading`);
+    expect(existsSync(fixture.capture)).toBe(false);
+  });
+
   it('enforces encoder total-size and fixed chunk-count bounds', () => {
     expect(() => createBootstrapPayloadEnvelope('x'.repeat(PAYLOAD_MAX_BYTES + 1))).toThrow(
       new RegExp(`between 1 and ${PAYLOAD_MAX_BYTES}`),
@@ -1055,6 +1072,7 @@ describe('automatic Squad bootstrap workflow', () => {
 
   it('compiles the default-branch/path gates and isolates writes to the typed materializer', () => {
     const lock = compileWorkflow();
+    expect(lock).toContain('{{#runtime-import .github/workflows/squad-bootstrap.md}}');
     expect(lock).toContain('branches:\n      - "**"');
     expect(lock).toContain('.github/workflows/squad-bootstrap.md');
     expect(lock).toContain('.github/workflows/squad-bootstrap.lock.yml');

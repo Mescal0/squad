@@ -263,6 +263,13 @@ permissions.
 ### Explicit fresh bootstrap after a failed attempt
 
 Signed Cast provenance binds the exact generated head commit (`cast_sha`).
+Before publication, the Cast validator requires separate `## Coordinator`
+(`Squad` / `Coordinator`) and `## Coding Agent` (`@copilot` / `Coding Agent`)
+table sections in `team.md`, outside the specialist `## Members` roster. The
+Coding Agent section must contain exactly one standalone
+`<!-- copilot-auto-assign: false -->` line. Inline prose is not the native
+configuration marker; automatic assignment remains disabled.
+
 Do not amend that branch or rewrite provenance to fix review findings. Correct
 the generation guidance in the trusted package, then use the reviewed fresh
 generation procedure below. The replacement Cast receives new provenance and
@@ -1920,6 +1927,16 @@ Exactly one current-head record is required. The legacy
 Per-PR concurrency cancels stale runs; both output and final gate re-fetch the
 live PR head. Missing, duplicate, malformed, stale, or equal-identity evidence
 fails closed. An unchanged head reuses its validated record, not arbitrary text.
+
+GitHub's workflow-run API can report the PR head in `head_sha` for a
+`pull_request_target` run. This is not the workflow source SHA. In that form,
+the guard requires explicit run-to-PR linkage with the exact PR number, head
+SHA, base SHA, and base repository name, alongside the trusted event, workflow
+path, repository, run title, run ID, and attempt. The verdict's `workflow_sha`
+must still equal the exact base commit. Missing PR linkage is accepted only for
+the existing base-SHA metadata form; a PR-head SHA and title alone never
+establish trusted workflow-source evidence. The final review and post-merge
+relay apply the same binding checks.
 
 ### Enforced verdicts and reviewer independence
 

@@ -1127,6 +1127,27 @@ describe('GH-AW Cast final-tree validator', () => {
     expect(result.stderr).toContain('Scribe');
   });
 
+  it.each([
+    ['missing coordinator', (team: string) => team.replace(/## Coordinator\n[\s\S]*?(?=## Members)/, '')],
+    ['empty coordinator', (team: string) => team.replace('| Squad | Coordinator | Active |', '')],
+    ['wrong coordinator', (team: string) => team.replace('| Squad | Coordinator |', '| Lead | Coordinator |')],
+    ['duplicate coordinator', (team: string) => `${team}\n## Coordinator\n\n| Squad | Coordinator | Active |\n`],
+    ['coordinator in members', (team: string) => team.replace('## Members\n', '## Members\n\n| Squad | Coordinator | Active |\n')],
+    ['missing coding section', (team: string) => team.replace(/## Coding Agent\n[\s\S]*/, '')],
+    ['coding agent in members', (team: string) => team.replace('## Members\n', '## Members\n\n| @copilot | Coding Agent | Available |\n')],
+    ['wrong coding agent', (team: string) => team.replace('| @copilot | Coding Agent |', '| Builder | Coding Agent |')],
+    ['inline marker', (team: string) => team.replace('<!-- copilot-auto-assign: false -->', '`copilot-auto-assign: false`')],
+    ['enabled marker', (team: string) => team.replace('copilot-auto-assign: false', 'copilot-auto-assign: true')],
+    ['duplicate marker', (team: string) => `${team}\n<!-- copilot-auto-assign: true -->\n`],
+    ['misplaced marker', (team: string) => `<!-- copilot-auto-assign: false -->\n${team.replace('<!-- copilot-auto-assign: false -->', '')}`],
+  ] as const)('rejects generated team with %s', (_label, mutate) => {
+    const fixture = createFixture();
+    write(fixture.root, '.squad/team.md', mutate(teamMarkdown()));
+    const result = validate(fixture.root, fixture.payload);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/team:.*(?:Coordinator|Coding Agent|copilot-auto-assign)/);
+  });
+
   it('rejects a Cast tree missing a required built-in charter (materialized directory + payload)', () => {
     const fixture = createFixture();
     rmSync(join(fixture.root, '.squad', 'agents', 'rai'), { recursive: true, force: true });
