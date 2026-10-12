@@ -87,6 +87,10 @@ export interface WorkAgentBindingContext {
   epicAssignments?: readonly EpicAssignment[];
 }
 
+/**
+ * One task's epic and agent assignment from the full frozen plan.
+ * Supply independently verified assignments when validating epic owner sets.
+ */
 export interface EpicAssignment {
   task: string;
   epic: string;
@@ -94,6 +98,10 @@ export interface EpicAssignment {
   agentId: string | null;
 }
 
+/**
+ * A comment ID and exact body supplied to activation selection, including any
+ * required source or predecessor. These fields alone do not authenticate its author.
+ */
 export interface ActivationRecord {
   id: number;
   body: string;
@@ -120,6 +128,11 @@ export interface ReconciliationEvidence {
   sourceKind?: 'activation' | 'pending';
 }
 
+/**
+ * Repository and origin scope plus independently verified reconciliation evidence.
+ * Supply one proof per reconciliation in a complete chain; caller-populated
+ * fields and frozen-plan assignments are not themselves authorization.
+ */
 export interface ActivationSelectionContext {
   repository: string;
   originIssue: number;
@@ -128,6 +141,11 @@ export interface ActivationSelectionContext {
   epicAssignments?: readonly EpicAssignment[];
 }
 
+/**
+ * The selected comment's ID, artifact kind and validated work-agent bindings.
+ * Selection checks consistency against supplied inputs, not API authorship or
+ * historical publication; callers must establish those trust boundaries separately.
+ */
 export interface SelectedActivationRecord {
   id: number;
   artifact: WorkAgentBinding['artifact'];

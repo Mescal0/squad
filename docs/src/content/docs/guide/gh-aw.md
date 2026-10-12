@@ -1528,6 +1528,109 @@ was published but the lifecycle write failed, an identical activation rerun vali
 the existing record and repairs only the lifecycle; it does not duplicate issues
 or acceptance. Reconciliation similarly retries its lifecycle update idempotently.
 
+### Reading activation records with the SDK
+
+The public `@bradygaster/squad-sdk/casting` subpath exports
+`selectActivationRecord(records, registry, context)`. It is a synchronous reader,
+not a GitHub API verifier. Supply `ActivationRecord` entries with the exact comment
+`id` and `body`, the independently frozen `AgentProvenanceRegistry`, and an
+`ActivationSelectionContext` containing `repository`, `originIssue`,
+`reconciliations`, and the full frozen plan's `epicAssignments` (`EpicAssignment[]`).
+Include the exact source and predecessor records needed by the reconciliation
+pair or complete chain, not just the newest comment.
+
+**Establish trust before calling the selector.** A trusted API verifier must
+authenticate the reconciliation request actor and their current authorization,
+freeze the plan and committed registry, and check the current issue mappings.
+Supply its independently obtained `ReconciliationEvidence` for every supplement.
+Copying hashes or actor IDs from a comment, constructing matching evidence fields,
+or asserting an `authorized` flag is not proof. The selector does not authenticate
+comment authors, fetch current GitHub state, or attest that a historical run
+created issues. Native continuations still need the packaged checker's separate
+current-API and history-head verification described above.
+
+This consumer-side fragment shows the public import and result handling. Its
+arguments must come from that trusted integration; it does not implement a verifier:
+
+```typescript
+import {
+  AgentProvenanceError,
+  selectActivationRecord,
+  type ActivationRecord,
+  type ActivationSelectionContext,
+  type AgentProvenanceRegistry,
+  type SelectedActivationRecord,
+} from '@bradygaster/squad-sdk/casting';
+
+function inspectActivation(
+  records: readonly ActivationRecord[],
+  registry: AgentProvenanceRegistry,
+  context: ActivationSelectionContext,
+): SelectedActivationRecord | undefined {
+  try {
+    const selected = selectActivationRecord(records, registry, context);
+    if (selected === undefined) {
+      console.info('No activation selected; do not dispatch work.');
+      return undefined;
+    }
+    console.info(selected.id, selected.artifact, selected.bindings);
+    return selected;
+  } catch (error) {
+    if (error instanceof AgentProvenanceError) {
+      console.error('Activation rejected:', error.message, error.diagnostics);
+    }
+    throw error;
+  }
+}
+```
+
+A selected result contains the comment `id`, `artifact` kind and validated
+`bindings`, not a new authorization grant. `undefined` means no activation
+candidate was selected; an empty or pending-only history is not acceptance.
+Malformed, conflicting or incompletely evidenced histories throw rather than
+returning `undefined`. Fail closed on errors: do not fall back to the newest
+comment, ignore a missing proof, or dispatch partial bindings.
+
+#### Run the existing executable example
+
+The repository's
+[activation finalization integration fixture](https://github.com/bradygaster/squad/blob/dev/test/gh-aw-activation-finalization.test.ts)
+is the executable producer/consumer example. In
+`continues after a later-phase pending-source recovery and validates the complete transitive reader chain`,
+it obtains proofs through the real workflow `verifyReconciliationRequest`,
+projects them with `selectionEvidence`, supplies `frozenAssignments`, and calls
+both the SDK selector and canonical checker. These helpers belong to
+`workflows/shared/squad-activation.mjs`; they are **not** public `/casting` verifier
+exports. The `trusted synchronous publication completion (source and strict-compiled jobs)`
+group also executes emitted job scripts and the pinned issue-creation API adapter.
+The companion [selector contract tests](https://github.com/bradygaster/squad/blob/dev/test/agent-provenance.test.ts)
+cover selection, no-record results and rejection cases; their hand-built evidence
+is test data, not production authorization.
+
+Run from a Squad repository checkout with Node.js **22.5.0 or newer**, npm, Git,
+GitHub CLI, and the repository's npm dependencies already installed. Install the
+exact compiler once with `gh extension install --pin v0.91.5 github/gh-aw`.
+If a different gh-aw version is installed, remove that extension with
+`gh extension remove gh-aw` before the pinned installation; v0.89.22 is unsupported
+for this fixture. With the pinned extension available, run:
+
+```bash
+test "$(gh aw --version | awk 'END {print $NF}')" = "v0.91.5" &&
+npm test -- test/gh-aw-activation-finalization.test.ts test/agent-provenance.test.ts
+```
+
+Alternatively, set `SQUAD_GH_AW_BIN` to an **absolute path** to an already obtained
+v0.91.5 executable when running that same `npm test` command. The fixture checks
+the exact compiler version, strict-compiles an isolated package installation,
+and validates immutable action pins. Outbound HTTPS access to
+`raw.githubusercontent.com` is required to fetch the runtime closure at
+`github/gh-aw-actions` commit `16b430146d5d5646eccef5a1ceb72152333b18b9`.
+GitHub issue APIs are synthetic and writes stay local: this example neither
+creates live issues nor demonstrates hosted credentials or permissions.
+A missing compiler, mismatched pin, failed runtime download or failed assertion
+is a failed run, not permission to skip coverage. A passing local run demonstrates
+the integration contract, not production trust for caller-supplied evidence.
+
 ### Granular lifecycle
 
 ```
