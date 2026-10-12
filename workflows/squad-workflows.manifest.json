@@ -152,7 +152,7 @@
       "package_destination": ".github/workflows/shared/check-agent-binding.mjs",
       "destination": ".github/workflows/shared/check-agent-binding.mjs",
       "ownership": "manifest",
-      "sha256": "261d766684ad213a41848e8c62e026b01492bf624d0e141c1ae7a36308c83b56"
+      "sha256": "db562006405e027ab16d06816e7c1ea7e1b651a390f4a423520af8835fe9835c"
     },
     {
       "path": "shared/squad-review-guard.mjs",

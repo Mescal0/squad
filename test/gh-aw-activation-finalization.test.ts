@@ -987,6 +987,72 @@ describe('dependency correction field grammar', () => {
 });
 
 describe('SDK/canonical checker reconciliation selection parity', () => {
+  it('preserves genuine whole-plan evidence with explicit or omitted phases', async () => {
+    const f = recovery();
+    const result = await f.reconcile();
+    const proof = selectionEvidence(await f.verify());
+    expect(proof.phases).toEqual([]);
+    const omitted = { ...proof };
+    delete omitted.phases;
+    for (const evidence of [proof, omitted]) {
+      const context = { repository, originIssue: 42, reconciliations: [evidence] };
+      const selections = [selectSdk, selectBuiltSdk, selectChecker]
+        .map(select => select([f.original, result], f.registry, context));
+      for (const selected of selections) {
+        expect(selected?.id).toBe(result.id);
+        expect(commonIdentity(selected)).toEqual(commonIdentity(selections[0]));
+      }
+    }
+  });
+
+  it.each([{ phases: [1, 2] }, { phases: [] }, { phases: [2] }])(
+    'rejects internally inconsistent activation-source evidence for replacement phases $phases',
+    async ({ phases: replacementPhases }) => {
+      const f = phasedFixture();
+      const capture = await f.prepare();
+      await f.finalize(capture, await f.create(capture));
+      const source = f.latest();
+      const bridge = await f.bridge(source);
+      const verify = () => verifyReconciliationRequest({
+        github: f.github, context: f.context, root: f.root,
+        requestCommentId: bridge.comment.id, requestSha256: digest(bridge.comment.body),
+      });
+      const proof = selectionEvidence(await verify());
+      const context = { repository, originIssue: 42, reconciliations: [proof],
+        epicAssignments: frozenAssignments(capture.fullPlan) };
+      expect(parseStructuredData(source.body).phases).toEqual([1]);
+      expect(proof.phases).toEqual([1]);
+      const replacement = {
+        ...bridge.result,
+        body: bridge.result.body.replace('"phases":[1]', `"phases":${JSON.stringify(replacementPhases)}`),
+      };
+      expect(parseStructuredData(replacement.body).phases).toEqual(replacementPhases);
+      const forgedContext = {
+        ...context, reconciliations: [{ ...proof, phases: replacementPhases }],
+      };
+      const writes = f.writes.length;
+      const creates = f.createIssue.mock.calls.length;
+      for (const select of [selectSdk, selectBuiltSdk, selectChecker]) {
+        const selected = select([source, bridge.result], f.registry, context);
+        expect(selected?.id).toBe(bridge.result.id);
+        expect(commonIdentity(selected))
+          .toEqual(commonIdentity(selectChecker([source, bridge.result], f.registry, context)));
+        // Authentic evidence already rejects tampering; forged evidence must remain internally consistent.
+        expect(() => select([source, replacement], f.registry, context)).toThrow();
+        expect(() => select([source, replacement], f.registry, forgedContext)).toThrow(/phase/);
+      }
+      bridge.request.phases = replacementPhases;
+      bridge.comment.body = block('Activation reconciliation request', bridge.request);
+      f.context.payload.comment.body = `/squad reconcile activation ${bridge.comment.id} ${digest(bridge.comment.body)}`;
+      await expect(verify()).rejects.toThrow(/phase/);
+      await expect(reconcileActivation({
+        github: f.github, context: f.context, env: f.env, root: f.root,
+      })).rejects.toThrow(/phase/);
+      expect(f.writes).toHaveLength(writes);
+      expect(f.createIssue).toHaveBeenCalledTimes(creates);
+    },
+  );
+
   it.each([
     ['no verifier evidence', (s: any) => { s.context.reconciliations = []; }],
     ['duplicate verifier evidence', (s: any) => { s.context.reconciliations.push(clone(s.context.reconciliations[0])); }],
@@ -1577,6 +1643,7 @@ describe('explicit pending-source current-state reconciliation', () => {
       epicAssignments: frozenAssignments(verified.fullPlan) };
     expect(selectChecker([f.original, result], f.registry, context)?.id).toBe(result.id);
     expect(selectSdk([f.original, result], f.registry, context)?.id).toBe(result.id);
+    expect(selectBuiltSdk([f.original, result], f.registry, context)?.id).toBe(result.id);
     expect(result.body).toContain('"supersedes_kind":"pending"');
     expect(await f.reconcile()).toMatchObject({ id: result.id, unchanged: true });
     expect(f.original.body).toBe(originalBody);

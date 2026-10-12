@@ -8,6 +8,8 @@ Preserve valid legacy activation records while rejecting ambiguous, malformed,
 or unverified replacements without rewriting historical acceptance.
 Require exactly one matching verifier evidence record and bind any selected
 phase scope to its canonical, independently verified phase IDs.
+Require activation-source phases to exactly match verifier evidence, rejecting
+internally inconsistent caller-supplied evidence without changing verifier trust.
 Reject malformed legacy phase scopes with non-positive, unsafe, nonnumeric, or
 duplicate phase IDs consistently with the packaged activation checker.
 Allow a verifier-supplied full frozen-plan assignment context to validate complete

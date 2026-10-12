@@ -74,7 +74,7 @@ describe('agent identity provenance contract', () => {
       const context = (reconciliations: readonly ReconciliationEvidence[] = []) => ({
         repository: 'owner/repo', originIssue: 45, reconciliations,
       });
-      function reconciled(sourceBody = body('activated', [{ issue: 'temporary-task' }])) {
+      function reconciled(sourceBody = body('activated', [{ issue: 'temporary-task' }], 45, [])) {
         const source = { id: 10, body: sourceBody };
         const rows = bindings('activation-reconciled');
         const currentRegistry = registry();
@@ -317,7 +317,7 @@ describe('agent identity provenance contract', () => {
       });
 
       it('accepts explicit supersession of malformed original binding JSON', () => {
-        const test = reconciled(body().replace(JSON.stringify(bindings()), '{not JSON'));
+        const test = reconciled(body('activated', bindings(), 45, []).replace(JSON.stringify(bindings()), '{not JSON'));
         expect(selectActivationRecord(
           [test.source, test.replacement()], test.currentRegistry, context([test.evidence]),
         )?.id).toBe(40);
@@ -383,7 +383,7 @@ describe('agent identity provenance contract', () => {
       });
 
       it('accepts only the explicitly verified canonical phase scope', () => {
-        const test = reconciled();
+        const test = reconciled(body('activated', [{ issue: 'temporary-task' }], 45, [1, 3]));
         const replacement = test.replacement();
         replacement.body = replacement.body.replace('"phases":[]', '"phases":[1,3]');
         const evidence = { ...test.evidence, phases: [1, 3] };
@@ -418,7 +418,7 @@ describe('agent identity provenance contract', () => {
       });
 
       function frozenPhase() {
-        const test = reconciled();
+        const test = reconciled(body('activated', [{ issue: 'temporary-task' }], 45, [1]));
         test.currentRegistry.agents['quality-engineer'] = {
           ...test.currentRegistry.agents['runtime-engineer']!,
           display_name: 'Orbit',
@@ -663,7 +663,7 @@ describe('agent identity provenance contract', () => {
       });
 
       it('rejects duplicates, competing reconciliations, and unsuperseded old acceptances', () => {
-        const test = reconciled(body());
+        const test = reconciled(body('activated', bindings(), 45, []));
         for (const records of [
           [test.source, test.source],
           [test.source, { ...test.source, id: 11 }],

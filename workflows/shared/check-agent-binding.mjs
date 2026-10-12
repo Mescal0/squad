@@ -843,7 +843,10 @@ function selectActivationPair(records, registryValue, context) {
       if (value.supersedes_kind !== 'pending' || source.pending.plan_sha256 !== value.plan_sha256 ||
         source.pending.registry_sha256 !== value.registry_sha256 ||
         JSON.stringify(source.pending.phases) !== JSON.stringify(phases)) fail('pending source lacks exact authorized frozen coverage');
-    } else if (value.supersedes_kind !== undefined) fail('source kind does not match the original activation');
+    } else {
+      if (value.supersedes_kind !== undefined) fail('source kind does not match the original activation');
+      if (JSON.stringify(source.artifact.phases) !== JSON.stringify(phases)) fail('activation source phase coverage mismatch');
+    }
     if (parsed.length !== 2) fail('ambiguous unsuperseded activation record');
     const bindings = [...selected.body.matchAll(/Activation bindings:\s*```json\s*([\s\S]*?)```/g)];
     if (bindings.length !== 1 || hash(JSON.parse(bindings[0][1])) !== value.bindings_sha256) fail('binding digest mismatch');

@@ -822,9 +822,12 @@ function selectActivationPair(
         throw new AgentProvenanceError('Malformed pending source or mismatched verifier plan, registry, or phase scope');
       }
     } else {
-      const sourceArtifact = activationEnvelope(
-        readActivationSection(source.body, 'Structured data'), context.originIssue,
-      );
+      const sourceEnvelope = readActivationSection(source.body, 'Structured data');
+      const sourceArtifact = activationEnvelope(sourceEnvelope, context.originIssue);
+      if (JSON.stringify((sourceEnvelope as Record<string, unknown>).phases)
+        !== JSON.stringify(evidence.phases ?? [])) {
+        throw new AgentProvenanceError('Activation reconciliation source phase scope does not match verifier evidence');
+      }
       if (sourceArtifact === 'activation-reconciled' || /Activation reconciliation:/.test(source.body)) {
         throw new AgentProvenanceError('Activation reconciliation cannot supersede a reconciliation');
       }
