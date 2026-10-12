@@ -259,6 +259,36 @@ describe('agent identity provenance contract', () => {
         },
       );
 
+      it.each([['1'], [0], [-1], [1.5], [Number.MAX_SAFE_INTEGER + 1], [1, 1]])(
+        'rejects malformed legacy phase scope %j in both readers',
+        (...phases) => {
+          for (const artifact of ['activated', 'phases-activated', 'plan-accepted', 'phases-accepted'] as const) {
+            const rows = bindings(artifact).map(binding => ({
+              ...binding, agent: 'Kepler', epic_agents: ['kepler'],
+              label: 'squad:kepler', epic_label: 'squad:kepler', depends_on: [],
+            }));
+            const valid = { id: 10, body: body(artifact, rows) };
+            const record = { ...valid, body: valid.body.replace('"phases":[1]', `"phases":${JSON.stringify(phases)}`) };
+            for (const select of [selectActivationRecord, selectChecker]) {
+              expect(select([valid], registry(), context())?.id).toBe(10);
+              expect(() => select([record], registry(), context())).toThrow(/phase/);
+            }
+          }
+        },
+      );
+
+      it('preserves valid legacy phase scopes with SDK/checker parity', () => {
+        for (const phases of [[], [1], [3, 1], [Number.MAX_SAFE_INTEGER]]) {
+          const rows = bindings().map(binding => ({
+            ...binding, agent: 'Kepler', epic_agents: ['kepler'],
+            label: 'squad:kepler', epic_label: 'squad:kepler', depends_on: [],
+          }));
+          const record = { id: 10, body: body('activated', rows, 45, phases) };
+          expect(selectChecker([record], registry(), context()))
+            .toMatchObject(selectActivationRecord([record], registry(), context())!);
+        }
+      });
+
       it('returns undefined for no relevant activation and ignores unrelated comments', () => {
         expect(selectActivationRecord([
           { id: 1, body: 'Discussion only' },

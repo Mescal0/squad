@@ -641,6 +641,9 @@ function activationEnvelope(value: unknown, originIssue: number): WorkAgentBindi
     || !Array.isArray(value.phases)) {
     throw new AgentProvenanceError('Unknown, malformed, or cross-origin activation envelope');
   }
+  if (!value.phases.every(isPositiveSafeInteger) || new Set(value.phases).size !== value.phases.length) {
+    throw new AgentProvenanceError('Malformed activation phase scope: expected unique positive safe integers');
+  }
   return value.squad_artifact as WorkAgentBinding['artifact'];
 }
 

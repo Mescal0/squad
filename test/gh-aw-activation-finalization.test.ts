@@ -223,6 +223,208 @@ function fixture({ count = 2, epic = false } = {}) {
   };
 }
 
+async function legacyFixture(epic = false) {
+  const f = fixture({ epic });
+  const capture = await f.prepare();
+  const journal = await f.create(capture);
+  const bindings = buildActivationBindings(capture, journal);
+  const original = f.comment(99, [
+    block('Activation bindings', bindings),
+    block('Structured data', envelope(epic ? 'activated' : 'plan-accepted')),
+  ].join('\n'));
+  f.comments.delete(journal.pending_comment_id);
+  f.comments.set(original.id, original);
+  f.writes.length = 0;
+  f.createIssue.mockClear();
+  return { ...f, original, bindings, capture };
+}
+
+describe('authenticated legacy activation promotion', () => {
+  it.each([false, true])('promotes a legacy record only with independently matching issue sources (epic=%s)', async epic => {
+    const f = await legacyFixture(epic);
+    const original = clone(f.original);
+    expect(f.original.body).not.toContain('Activation evidence:');
+    expect(await f.prepare()).toEqual({ existingAcceptanceId: 99 });
+    expect(f.writes).toHaveLength(1);
+    expect(f.writes[0].params.body).toContain('**State:** Activated');
+    expect(f.comments.get(99)).toEqual(original);
+    expect(f.createIssue).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('keeps demonstrably bound legacy phases partial (shared epic=%s)', async sharedEpic => {
+    const f = phasedFixture(sharedEpic);
+    const capture = await f.prepare();
+    await f.finalize(capture, await f.create(capture));
+    const original = f.latest();
+    original.body = original.body.replace(/Activation evidence:\s*```json\s*[\s\S]*?```/, '');
+    const preserved = clone(original);
+    f.writes.length = 0;
+    f.createIssue.mockClear();
+    expect(await f.prepare()).toEqual({ existingAcceptanceId: original.id });
+    expect(f.comments.get(original.id)).toEqual(preserved);
+    expect(f.writes).toEqual([]);
+    expect(f.createIssue).not.toHaveBeenCalled();
+    f.context.payload.comment.body = sharedEpic ? '/squad plan activate' : '/squad activate';
+    await expect(f.prepare()).rejects.toThrow(/only prior phases are accepted/);
+    expect(f.writes).toEqual([]);
+  });
+
+  it('rejects the read-only outsider single-binding forgery for an unrelated labelled issue', async () => {
+    const f = await legacyFixture();
+    const binding = { ...f.bindings[0], issue: '#201' };
+    f.issues.set(201, f.issue(201, { labels: ['squad', 'squad:builder'] }));
+    f.original.user = { id: 701, login: 'outsider', type: 'User' };
+    f.original.body = [block('Activation bindings', [binding]), block('Structured data', envelope('plan-accepted'))].join('\n');
+    const original = clone(f.original);
+    await expect(f.prepare()).rejects.toThrow(/workflow-bot.*reconciliation/);
+    expect(f.permissions.get('outsider')).toBeUndefined();
+    expect(f.writes).toEqual([]);
+    expect(f.createIssue).not.toHaveBeenCalled();
+    expect(f.comments.get(99)).toEqual(original);
+  });
+
+  it.each([
+    'missing-stable-id', 'wrong-stable-id', 'missing-source-hash', 'wrong-owner', 'wrong-dependencies',
+    'wrong-parent', 'wrong-api-parent', 'partial-task-set', 'wrong-binding-dependencies', 'unknown-phase',
+    'wrong-artifact', 'wrong-plan-author', 'wrong-plan-origin', 'wrong-record-origin', 'wrong-bot-login',
+    'wrong-bot-type', 'unrelated-labelled-issues',
+  ])('requires reconciliation without writes for legacy %s', async mutation => {
+    const f = await legacyFixture();
+    const issue = f.issues.get(102)!;
+    if (mutation === 'missing-stable-id') issue.body = issue.body.replace('**Stable work ID:** task:2\n', '');
+    if (mutation === 'wrong-stable-id') issue.body = issue.body.replace('task:2', 'task:unrelated');
+    if (mutation === 'missing-source-hash') issue.body = issue.body.replace(/^Plan SHA-256:.*\n/m, '');
+    if (mutation === 'wrong-owner') issue.body = issue.body.replace('**Owner:** Builder', '**Owner:** Outsider');
+    if (mutation === 'wrong-dependencies') issue.body = issue.body.replace('**Depends On:** #101', '**Depends On:** None');
+    if (mutation === 'wrong-parent') issue.body = issue.body.replace('**Parent:** #42', '**Parent:** #43');
+    if (mutation === 'wrong-api-parent') { f.parents.set(102, 43); f.issues.set(43, f.issue(43)); }
+    if (mutation === 'partial-task-set') f.original.body = f.original.body.replace(JSON.stringify(f.bindings), JSON.stringify(f.bindings.slice(0, 1)));
+    if (mutation === 'wrong-binding-dependencies') f.original.body = f.original.body.replace('"depends_on":["#101"]', '"depends_on":[]');
+    if (mutation === 'unknown-phase') f.original.body = f.original.body.replace('"phases":[]', '"phases":[99]');
+    if (mutation === 'wrong-artifact') f.original.body = f.original.body.replaceAll('plan-accepted', 'activated');
+    if (mutation === 'wrong-plan-author') f.comments.get(10)!.user = clone(operator);
+    if (mutation === 'wrong-plan-origin') f.comments.get(10)!.issue_url = 'https://api.github.com/repos/owner/repo/issues/43';
+    if (mutation === 'wrong-record-origin') f.original.issue_url = 'https://api.github.com/repos/owner/repo/issues/43';
+    if (mutation === 'wrong-bot-login') f.original.user.login = 'different[bot]';
+    if (mutation === 'wrong-bot-type') f.original.user.type = 'User';
+    if (mutation === 'unrelated-labelled-issues') for (const issue of f.issues.values()) issue.body = '';
+    const original = clone(f.original);
+    await expect(f.prepare()).rejects.toThrow(/reconciliation|hierarchy/);
+    expect(f.writes).toEqual([]);
+    expect(f.createIssue).not.toHaveBeenCalled();
+    expect(f.comments.get(99)).toEqual(original);
+  });
+});
+
+describe('retry-safe activation preflight', () => {
+  it('rejects short-line expansion before any durable reservation or issue create', async () => {
+    const f = fixture();
+    f.comments.get(10)!.body += '\n'.repeat(33000);
+    expect(Buffer.byteLength(f.comments.get(10)!.body)).toBeLessThan(35000);
+    const capture = await f.prepare();
+    await expect(f.create(capture)).rejects.toThrow(/rendered issue body exceeds/);
+    expect(f.writes).toEqual([]);
+    expect(f.createIssue).not.toHaveBeenCalled();
+  });
+
+  it('includes sanitizer expansion and worst-case dependency reference widths in preflight', async () => {
+    const f = fixture({ epic: true });
+    const capture = await f.prepare();
+    const seen: string[] = [];
+    await expect(createActivation({
+      github: f.github, context: f.context, env: f.env, root: f.root, capture,
+      captureArtifactId: 800, journalPath: f.journalPath, createIssue: f.createIssue,
+      sanitizeContent: (body: string) => {
+        seen.push(body);
+        return body.includes('**Depends On:** #') ? body + 'x'.repeat(65536) : body;
+      },
+    })).rejects.toThrow(/rendered issue body exceeds/);
+    expect(seen.some(body => body.includes(`**Parent:** #${Number.MAX_SAFE_INTEGER}`))).toBe(true);
+    expect(seen.some(body => body.includes(`**Depends On:** #${Number.MAX_SAFE_INTEGER}`))).toBe(true);
+    expect(f.writes).toEqual([]);
+    expect(f.createIssue).not.toHaveBeenCalled();
+  });
+
+  it.each([65535, 65536, 65537])('bounds the exact rendered %i-character body including Unicode', async size => {
+    const baseline = fixture({ count: 1 });
+    await baseline.create(await baseline.prepare());
+    const baselineBody = baseline.writes.find(write => write.method === 'createIssue')!.params.body;
+    const extra = size - [...baselineBody].length;
+    const f = fixture({ count: 1 });
+    f.comments.get(10)!.body += '\n'.repeat(Math.floor(extra / 3)) + '😀'.repeat(extra % 3);
+    expect(Buffer.byteLength(f.comments.get(10)!.body)).toBeLessThan(35000);
+    const capture = await f.prepare();
+    if (size > 65536) {
+      await expect(f.create(capture)).rejects.toThrow(/rendered issue body exceeds/);
+      expect(f.writes).toEqual([]);
+      expect(f.createIssue).not.toHaveBeenCalled();
+    } else {
+      const journal = await f.create(capture);
+      expect([...f.writes.find(write => write.method === 'createIssue')!.params.body]).toHaveLength(size);
+      await f.finalize(capture, journal);
+      expect(f.createIssue).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it.each([
+    ['getLabel', 403], ['getLabel', 500], ['createLabel', 403], ['createLabel', 500],
+  ] as const)('permits a clean retry after prerequisite %s fails with %i', async (method, status) => {
+    const f = fixture();
+    const capture = await f.prepare();
+    f.github.rest.issues[method].mockRejectedValueOnce(Object.assign(new Error('pre-create failure'), { status }));
+    await expect(f.create(capture)).rejects.toThrow('pre-create failure');
+    expect(f.createIssue).not.toHaveBeenCalled();
+    expect([...f.comments.values()].some(comment => comment.body.includes('squad-activation-pending/v1'))).toBe(false);
+    const retry = await f.prepare();
+    const journal = await f.create(retry);
+    await f.finalize(retry, journal);
+    expect(f.createIssue).toHaveBeenCalledTimes(2);
+    expect(f.accepted()).toHaveLength(1);
+  });
+
+  it('reuses a provisioned label after its response is lost without reserving early', async () => {
+    const f = fixture();
+    const provision = f.github.rest.issues.createLabel.getMockImplementation()!;
+    f.github.rest.issues.createLabel.mockImplementationOnce(async params => {
+      await provision(params);
+      throw Object.assign(new Error('label response lost'), { status: 500 });
+    });
+    await expect(f.create(await f.prepare())).rejects.toThrow('label response lost');
+    expect(f.createIssue).not.toHaveBeenCalled();
+    expect([...f.comments.values()].some(comment => comment.body.includes('squad-activation-pending/v1'))).toBe(false);
+    const capture = await f.prepare();
+    await f.finalize(capture, await f.create(capture));
+    expect(f.writes.filter(write => write.method === 'createLabel' && write.params.name === 'squad')).toHaveLength(1);
+    expect(f.createIssue).toHaveBeenCalledTimes(2);
+  });
+
+  it('rechecks reservation admission after retry-safe prerequisites', async () => {
+    const f = fixture();
+    const capture = await f.prepare();
+    const provision = f.github.rest.issues.createLabel.getMockImplementation()!;
+    f.github.rest.issues.createLabel.mockImplementationOnce(async params => {
+      const result = await provision(params);
+      f.comments.set(98, f.comment(98, 'squad-activation-pending/v1'));
+      return result;
+    });
+    await expect(f.create(capture)).rejects.toThrow(/reserved or accepted during preflight/);
+    expect(f.createIssue).not.toHaveBeenCalled();
+    expect(f.writes.every(write => write.method === 'createLabel')).toBe(true);
+  });
+
+  it('retains the no-create guard when an issue is stored but its create response fails', async () => {
+    const f = fixture();
+    const capture = await f.prepare();
+    f.hooks.result = () => { throw Object.assign(new Error('response lost'), { status: 500 }); };
+    await expect(f.create(capture)).rejects.toThrow('response lost');
+    expect(f.issues.has(101)).toBe(true);
+    expect(f.createIssue).toHaveBeenCalledTimes(1);
+    await expect(f.prepare()).rejects.toThrow(/pending activation/);
+    await expect(f.create(capture)).rejects.toThrow(/reserved/);
+    expect(f.createIssue).toHaveBeenCalledTimes(1);
+  });
+});
+
 function recovery(options: { count?: number; epic?: boolean } = {}) {
   const f = fixture(options);
   const original = f.comment(20, [
@@ -325,8 +527,9 @@ describe('trusted whole-plan activation finalization', () => {
     expect(f.parents.get(taskStart + 1)).toBe(epic ? 101 : 42);
     expect(journal.receipts.map((receipt: any) => [receipt.number, receipt.id, receipt.node_id]))
       .toEqual(Array.from({ length: epic ? 3 : 2 }, (_, i) => [101 + i, 1101 + i, `I_example_${101 + i}`]));
-    expect(f.writes[0].method).toBe('createComment');
-    expect(f.writes[0].params.body).toContain('squad-activation-pending/v1');
+    const reservation = f.writes.findIndex(write => write.params.body?.includes('squad-activation-pending/v1'));
+    expect(reservation).toBeGreaterThanOrEqual(0);
+    expect(reservation).toBeLessThan(f.writes.findIndex(write => write.method === 'createIssue'));
     expect(f.issues.get(42)).toEqual(originalRoot);
     for (const [id, comment] of originalComments) expect(f.comments.get(id)).toEqual(comment);
     expect(readFileSync(f.capturePath, 'utf8')).toBe(capturedBytes);
@@ -844,6 +1047,26 @@ function addValidation(f: ReturnType<typeof phasedFixture>) {
 }
 
 describe('combined implementation-phase acceptance and activation', () => {
+  it.each([false, true])('retries phase-approval failure before reservation (stored=%s)', async stored => {
+    const f = phasedFixture(true);
+    addValidation(f);
+    f.context.payload.comment.body = '/squad plan accept implementation phase 1';
+    const post = f.github.rest.issues.createComment.getMockImplementation()!;
+    f.github.rest.issues.createComment.mockImplementationOnce(async params => {
+      expect(params.body).toContain('impl-phases-accepted');
+      if (stored) await post(params);
+      throw Object.assign(new Error('approval response failed'), { status: 500 });
+    });
+    await expect(f.create(await f.prepare())).rejects.toThrow('approval response failed');
+    expect(f.createIssue).not.toHaveBeenCalled();
+    expect([...f.comments.values()].some(comment => comment.body.includes('squad-activation-pending/v1'))).toBe(false);
+    const capture = await f.prepare();
+    await f.finalize(capture, await f.create(capture));
+    expect([...f.comments.values()].filter(comment =>
+      parseStructuredData(comment.body)?.squad_artifact === 'impl-phases-accepted')).toHaveLength(1);
+    expect(f.createIssue).toHaveBeenCalledTimes(2);
+  });
+
   it('uses the same writer and bridge, then retries without duplicate creates', async () => {
     const f = phasedFixture(true);
     addValidation(f);

@@ -222,12 +222,34 @@ describe('gh-aw: trusted fresh-repository label provisioning', () => {
     expect(f.createIssue).not.toHaveBeenCalled();
   });
 
-  it('does not create any issue when missing-label provisioning fails', async () => {
+  it.each([403, 500])('does not reserve or create issues when label provisioning fails with HTTP %s, then retries safely', async status => {
     const f = fixture();
-    f.api.createLabel.mockRejectedValueOnce(Object.assign(new Error('Permission denied'), { status: 403 }));
-    await expect(f.create(await f.prepare())).rejects.toThrow('Permission denied');
+    const originalComments = clone([...f.comments.entries()]);
+    const originalOrigin = clone(f.issues.get(42));
+    f.api.createLabel.mockRejectedValueOnce(Object.assign(new Error('Label provisioning failed'), { status }));
+    await expect(f.create(await f.prepare())).rejects.toThrow('Label provisioning failed');
     expect(f.createIssue).not.toHaveBeenCalled();
-    expect(JSON.parse(readFileSync(f.journalPath, 'utf8')).started).toEqual([]);
+    expect(f.api.createComment).not.toHaveBeenCalled();
+    expect(f.api.addSubIssue).not.toHaveBeenCalled();
+    expect(f.api.addLabels).not.toHaveBeenCalled();
+    expect(existsSync(f.journalPath)).toBe(false);
+    expect([...f.comments.entries()]).toEqual(originalComments);
+    expect([...f.issues.keys()]).toEqual([42]);
+
+    const capture = await f.prepare();
+    const journal = await f.create(capture);
+    expect(journal.started).toEqual(capture.operations.map((operation: any) => operation.id));
+    expect(journal.receipts).toHaveLength(capture.operations.length);
+    const reservation = f.calls.findIndex(call => call.params.body?.includes('squad-activation-pending/v1'));
+    expect(reservation).toBeGreaterThanOrEqual(0);
+    expect(reservation).toBeLessThan(f.calls.findIndex(call => call.method === 'createIssue'));
+    expect(f.comments.get(journal.pending_comment_id)?.body).toContain('squad-activation-pending/v1');
+    await f.finalize(capture, journal);
+    expect(await f.prepare()).toHaveProperty('existingAcceptanceId');
+    expect(f.createIssue).toHaveBeenCalledTimes(capture.operations.length);
+    expect(new Set(journal.receipts.map((receipt: any) => receipt.number)).size).toBe(capture.operations.length);
+    expect(f.issues.size).toBe(capture.operations.length + 1);
+    expect(f.issues.get(42)).toEqual(originalOrigin);
   });
 
   it.each([false, true])('rejects non-roster creation before reservation or label writes (implementation=%s)', async implementation => {

@@ -445,19 +445,21 @@ export async function enforceSquadCommandContract({
     const activationArtifacts = new Set(['plan-accepted', 'phases-accepted', 'activated', 'phases-activated', 'activation-reconciled']);
     for (const item of items) {
       if (!item || typeof item !== 'object') throw new Error('Squad output item is malformed.');
-      const body = typeof item.body === 'string' ? item.body.replace(/<!--[\s\S]*?-->/g, '') : '';
-      const envelopes = [...body.matchAll(/Structured data:\s*```json\s*([\s\S]*?)```/gi)];
+      const rawBody = typeof item.body === 'string' ? item.body : '';
+      // Readers can see fenced HTML comments; also inspect the normalized view
+      // so comment-split lifecycle text cannot bypass the trusted writer boundary.
+      const bodies = [rawBody, rawBody.replace(/<!--[\s\S]*?-->/g, '')];
       if (activationArtifacts.has(item.data?.squad_artifact) ||
-          /Activation (?:bindings|reconciliation):/i.test(body) ||
+          bodies.some(body => /Activation (?:bindings|reconciliation):/i.test(body) ||
           /squad-activation-(?:pending|finalization)\/v1/.test(body) ||
           (item.type === 'upsert_lifecycle_state' &&
             (/^(?:[-*]\s+)?\*\*(?:Current state|State):\*\*\s+Activated\s*$/im.test(body) ||
              /^(?:[-*]\s+)?(?:\*\*)?Activation:(?:\*\*)?\s+(?:✅\s+)?Done\b/im.test(body) ||
              /^\|\s*Activat(?:e|ion|ed)\s*\|\s*✅\s+Done\b/im.test(body))) ||
-          envelopes.some(match => {
+          [...body.matchAll(/Structured data:\s*```json\s*([\s\S]*?)```/gi)].some(match => {
             try { return activationArtifacts.has(JSON.parse(match[1])?.squad_artifact); }
             catch { return true; }
-          }) ||
+          })) ||
           (result.mode.startsWith('plan') && item.type === 'create_issue')) {
         throw new Error('Activation acceptance, bindings and terminal lifecycle belong exclusively to the trusted writer.');
       }

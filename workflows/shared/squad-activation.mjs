@@ -16,6 +16,7 @@ const SHA = /^[a-f0-9]{40}$/;
 const BOT_ID = 41898282;
 const MAX_ISSUES = 50;
 const MAX_PLAN_BYTES = 35000;
+const MAX_ISSUE_BODY_CHARACTERS = 65536;
 
 function isActivationCommand(command) {
   return ACTIVATION_MODES.has(command.mode) ||
@@ -40,6 +41,13 @@ function normalize(value) {
 
 function envelope(body) {
   return parseStructuredData(body ?? '', { envelopeOnly: true });
+}
+
+function requireWorkflowRecord(comment, repository, origin) {
+  requireThat(comment?.user?.id === BOT_ID && comment.user.login === 'github-actions[bot]' &&
+    comment.user.type === 'Bot' &&
+    comment.issue_url === `https://api.github.com/repos/${repository}/issues/${origin}`,
+  'acceptance and plan authority must be workflow-bot records on this origin; explicit reconciliation is required');
 }
 
 function labelFor(name, roster) {
@@ -410,6 +418,7 @@ export async function prepareActivation({ github, context, env, root, outputPath
       !accepted.some(({ artifact }) => artifact.phases?.includes(command.phase))) {
     const bridges = [];
     for (const candidate of accepted.filter(({ artifact }) => artifact.squad_artifact === 'activation-reconciled')) {
+      requireWorkflowRecord(candidate.comment, `${context.repo.owner}/${context.repo.repo}`, origin);
       const metadata = jsonBlock(candidate.comment.body, 'Activation reconciliation');
       const verified = await verifyReconciliationRequest({
         github, context, root, requestCommentId: metadata.request_comment_id, requestSha256: metadata.request_sha256,
@@ -446,6 +455,7 @@ export async function prepareActivation({ github, context, env, root, outputPath
     requireThat(selected.length === 1,
       'existing phase/supersession authority is incomplete or ambiguous; later-phase creation is blocked');
     const { comment } = selected[0];
+    requireWorkflowRecord(comment, `${context.repo.owner}/${context.repo.repo}`, origin);
     const artifact = parseStructuredData(comment.body);
     let assignments;
     let fullPlan;
@@ -465,11 +475,10 @@ export async function prepareActivation({ github, context, env, root, outputPath
       const published = await verifyPublishedActivation({ github, context, root, comment });
       fullPlan = published.fullPlan;
       assignments = published.assignments;
-    } else if (artifact.phases?.length) {
-      const currentPlan = comments.find(item => item.id === planId);
-      requireThat(currentPlan?.user?.id === BOT_ID, 'phased no-op requires the frozen plan source');
-      fullPlan = parseActivationPlan(currentPlan.body,
-        envelope(currentPlan.body)?.squad_artifact, registry, team, []);
+    } else {
+      fullPlan = await verifyLegacyActivation({
+        github, context, comments, comment, planId, registry, team, origin,
+      });
       assignments = frozenAssignments(fullPlan);
     }
     if (command.phase === null && artifact.phases?.length) {
@@ -720,6 +729,13 @@ function bodyFor(operation, capture, journal) {
   };
 }
 
+function checkedIssueBody(body, operation, sanitizeContent) {
+  const sanitized = sanitizeContent(body);
+  requireThat(typeof sanitized === 'string' && [...sanitized].length <= MAX_ISSUE_BODY_CHARACTERS,
+    `operation ${operation.id}: rendered issue body exceeds GitHub's ${MAX_ISSUE_BODY_CHARACTERS}-character limit`);
+  return sanitized;
+}
+
 function identityLines(body) {
   return String(body ?? '').split(/\r?\n/).filter(line =>
     /^\*\*(?:Stable work ID|Parent|Depends On):\*\*/.test(line));
@@ -764,6 +780,14 @@ export async function createActivation({
     `operation ${operation.id}: unsupported activation label`);
     return [operation.id, title];
   }));
+  // Reserve only after rendering every body with the longest accepted numeric
+  // references. GitHub counts Unicode characters, not UTF-8 bytes.
+  const preview = { receipts: capture.operations.map(operation => ({
+    operation_id: operation.id, number: Number.MAX_SAFE_INTEGER,
+  })) };
+  for (const operation of capture.operations) {
+    checkedIssueBody(bodyFor(operation, capture, preview).body, operation, sanitizeContent);
+  }
   const comments = await github.paginate(github.rest.issues.listComments, {
     ...context.repo, issue_number: capture.origin_issue, per_page: 100,
   });
@@ -776,6 +800,42 @@ export async function createActivation({
   })).data;
   requireThat(currentPlan.updated_at === capture.plan_comment.updated_at &&
     digest(currentPlan.body) === capture.plan_comment.sha256, 'plan changed after capture');
+  // Label provisioning and exact approval upserts are retry-safe prerequisites,
+  // unlike createIssue, whose ambiguous outcomes must retain the reservation.
+  const labels = [...new Set(capture.operations.flatMap(operation => operation.labels))];
+  for (const name of labels) {
+    requireThat(name === 'squad' || /^squad:[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name), 'unsupported activation label');
+    try {
+      await github.rest.issues.getLabel({ ...context.repo, name });
+    } catch (error) {
+      if (error.status !== 404) throw error;
+      await github.rest.issues.createLabel({ ...context.repo, name, color: '9B8FCC' });
+    }
+  }
+  if (capture.approvals?.validation) {
+    const body = [
+      `## Implementation Phase ${capture.phase} Accepted`,
+      `**Implementation plan:** ${capture.plan_comment.url}`,
+      `**Implementation SHA-256:** ${capture.plan_comment.sha256}`,
+      `Validation: ${capture.approvals.validation.html_url}`,
+      `Accepted by: ${capture.actor}`,
+      '', 'Structured data:', '```json',
+      JSON.stringify({ squad_artifact: 'impl-phases-accepted', schema_version: '1',
+        origin_issue: capture.origin_issue, phases: [...(capture.prior?.phases ?? []), capture.phase] }), '```',
+    ].join('\n');
+    if (!comments.some(comment => comment.body === body && comment.user?.id === BOT_ID &&
+      comment.user?.login === 'github-actions[bot]' && comment.user?.type === 'Bot' &&
+      comment.issue_url === `https://api.github.com/repos/${capture.repository}/issues/${capture.origin_issue}`)) {
+      await github.rest.issues.createComment({ ...context.repo, issue_number: capture.origin_issue, body });
+    }
+  }
+  const beforeReservation = await github.paginate(github.rest.issues.listComments, {
+    ...context.repo, issue_number: capture.origin_issue, per_page: 100,
+  });
+  requireThat(!beforeReservation.some(comment =>
+    (String(comment.body ?? '').includes('squad-activation-pending/v1') && !capture.prior?.ignored_pending_ids.includes(comment.id)) ||
+    (ACCEPTANCES.has(envelope(comment.body)?.squad_artifact) && !capture.prior?.allowed_comment_ids.includes(comment.id))),
+  'activation was reserved or accepted during preflight; no issue may be recreated');
   const pending = await github.rest.issues.createComment({
     ...context.repo, issue_number: capture.origin_issue, body: pendingBody(capture, captureArtifactId),
   });
@@ -788,38 +848,14 @@ export async function createActivation({
   };
   const save = () => writeFileSync(journalPath, `${JSON.stringify(journal)}\n`);
   save();
-  if (capture.approvals?.validation) {
-    await github.rest.issues.createComment({
-      ...context.repo, issue_number: capture.origin_issue,
-      body: [
-        `## Implementation Phase ${capture.phase} Accepted`,
-        `**Implementation plan:** ${capture.plan_comment.url}`,
-        `**Implementation SHA-256:** ${capture.plan_comment.sha256}`,
-        `Validation: ${capture.approvals.validation.html_url}`,
-        `Accepted by: ${capture.actor}`,
-        '', 'Structured data:', '```json',
-        JSON.stringify({ squad_artifact: 'impl-phases-accepted', schema_version: '1',
-          origin_issue: capture.origin_issue, phases: [...(capture.prior?.phases ?? []), capture.phase] }), '```',
-      ].join('\n'),
-    });
-  }
-  const labels = [...new Set(capture.operations.flatMap(operation => operation.labels))];
-  for (const name of labels) {
-    requireThat(name === 'squad' || /^squad:[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name), 'unsupported activation label');
-    try {
-      await github.rest.issues.getLabel({ ...context.repo, name });
-    } catch (error) {
-      if (error.status !== 404) throw error;
-      await github.rest.issues.createLabel({ ...context.repo, name, color: '9B8FCC' });
-    }
-  }
   for (const operation of capture.operations) {
     const content = bodyFor(operation, capture, journal);
+    const body = checkedIssueBody(content.body, operation, sanitizeContent);
     journal.started.push(operation.id);
     save();
     // No retry on an ambiguous API failure: the durable reservation outlives this runner.
     const result = await createIssue({
-      ...context.repo, title: titles.get(operation.id), body: sanitizeContent(content.body),
+      ...context.repo, title: titles.get(operation.id), body,
       labels: operation.labels,
     });
     const receipt = validateCreateReceipt(result, operation, capture, [...(capture.prior?.issues ?? []), ...journal.receipts]);
@@ -962,6 +998,66 @@ export function selectionEvidence(verified) {
     bindingsSha256: digest(verified.bindings), phases: verified.request.phases ?? [],
     sourceKind: verified.request.source_kind ?? 'activation',
   };
+}
+
+async function verifyLegacyActivation({ github, context, comments, comment, planId, registry, team, origin }) {
+  const repository = `${context.repo.owner}/${context.repo.repo}`;
+  const artifact = parseStructuredData(comment.body);
+  const plans = comments.filter(item => {
+    const value = envelope(item.body);
+    return ['plan', 'implementation'].includes(value?.squad_artifact) &&
+      value.schema_version === '1' && value.origin_issue === origin;
+  }).sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)) || left.id - right.id);
+  const planComment = plans.at(-1);
+  requireWorkflowRecord(planComment, repository, origin);
+  requireThat(planComment.id === planId, 'legacy acceptance requires the current explicit plan; reconcile changed sources');
+  const draft = jsonBlock(planComment.body, 'Structured data');
+  requireThat(Array.isArray(draft.phases) && draft.phases.length === 0, 'legacy source draft has invalid phases');
+  const fullPlan = parseActivationPlan(planComment.body, draft.squad_artifact, registry, team, []);
+  validateActivation(artifact, parseRoster(team), new Map(), origin, {
+    repository, registry: parseAgentRegistry(registry), structuralOnly: true, epicAssignments: frozenAssignments(fullPlan),
+  });
+  requireThat(artifact.phases.every(phase => fullPlan.tasks.some(task => task.phase === phase)),
+    'legacy acceptance names an unknown plan phase; explicit reconciliation is required');
+  const plan = { ...fullPlan, tasks: fullPlan.tasks.filter(task =>
+    artifact.phases.length === 0 || artifact.phases.includes(task.phase)) };
+  requireThat(plan.tasks.length === artifact.bindings.length &&
+    plan.tasks.every(task => artifact.bindings.some(binding => binding.task === task.id)),
+  'legacy acceptance must cover the exact plan task set; explicit reconciliation is required');
+  const receipts = new Map();
+  for (const binding of artifact.bindings) {
+    receipts.set(`task:${binding.task}`, { number: extractIssueNumber(binding.issue) });
+    if (binding.epic !== 'origin') receipts.set(`epic:${binding.epic}`, { number: extractIssueNumber(binding.epic_issue) });
+  }
+  requireThat(plan.tasks.every(task => task.dependencies.every(id => receipts.has(`task:${id}`))),
+    'legacy phase coverage omits dependencies; explicit reconciliation is required');
+  const expected = bindingsForIssueMap({
+    repository, origin_issue: origin, plan, fullPlan, registry, phase: artifact.phases.length ? artifact.phases.at(-1) : null,
+  }, receipts);
+  requireThat(isDeepStrictEqual(expected, artifact.bindings),
+    'legacy bindings differ from the exact plan; explicit reconciliation is required');
+  // Old records remain readable, but promotion needs issue-side source identity,
+  // not an unverified model mapping, a matching title, or ownership labels.
+  for (const [operation, receipt] of receipts) {
+    const issue = (await github.rest.issues.get({ ...context.repo, issue_number: receipt.number })).data;
+    const binding = expected.find(binding => operation === `task:${binding.task}`);
+    const parent = binding ? extractIssueNumber(binding.epic_issue) : origin;
+    const fields = [
+      `**Stable work ID:** ${operation}`, `**Parent:** #${parent}`,
+      `**Depends On:** ${binding?.depends_on.length ? binding.depends_on.join(', ') : 'None'}`,
+    ];
+    const sourceLines = String(issue.body ?? '').split(/\r?\n/).filter(line =>
+      /^(?:Frozen plan:|Plan SHA-256:|\*\*Owner:\*\*)/.test(line));
+    requireThat(!issue.pull_request && issue.number === receipt.number &&
+      issue.url === `https://api.github.com/repos/${repository}/issues/${receipt.number}` &&
+      isDeepStrictEqual(identityLines(issue.body), fields) &&
+      isDeepStrictEqual(sourceLines, [
+        ...(binding ? [`**Owner:** ${binding.agent}`] : []),
+        `Frozen plan: ${planComment.html_url}`, `Plan SHA-256: ${digest(planComment.body)}`,
+      ]), 'legacy issue source/task/owner/parent/dependencies are unproved; explicit reconciliation is required');
+    await verifyCurrentParent(github, context, receipt.number, parent, operation, []);
+  }
+  return fullPlan;
 }
 
 export async function verifyPublishedActivation({ github, context, root, comment }) {
