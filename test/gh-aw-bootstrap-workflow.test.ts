@@ -1351,7 +1351,7 @@ describe('gh-aw: squad-bootstrap candidate lifetime', () => {
     const workspace = mkdtempSync(join(tmpdir(), 'gh-aw-bootstrap-writer-'));
     workspaces.push(workspace);
     const checkout = join(workspace, 'bootstrap-repo');
-    cpSync(fixture.root, checkout, { recursive: true });
+    execFileSync('git', ['clone', '--quiet', fixture.root, checkout]);
     cpSync(resolve(ROOT, 'workflows/shared'), join(checkout, '.github/workflows/shared'), { recursive: true });
     const outputPath = join(workspace, 'output.json');
     writeFileSync(outputPath, JSON.stringify({
