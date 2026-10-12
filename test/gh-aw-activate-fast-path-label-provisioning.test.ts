@@ -129,6 +129,46 @@ describe('gh-aw: fast-path request boundary', () => {
 });
 
 describe('gh-aw: frozen fast-path owner and actual-ID correspondence', () => {
+  it.each([
+    ['Azure Frontend', 'azure-frontend'],
+    ['Dr. Example', 'dr-example'],
+    ['--Release_Lead--', 'release-lead'],
+  ])('derives the actual task and epic label from certified display name %s', (name, slug) => {
+    const identities = structuredClone(registry);
+    identities.agents.builder.display_name = name;
+    identities.agents.builder.persistent_name = name;
+    const plan = parse(`### Phase 1\n${table([`| build | Example | ${name} | builder | None |`])}`,
+      team.replace('Builder', name), identities);
+    const operations = [{ id: 'epic:phase-1', epic: 'phase-1' }, { id: 'task:build', task: 'build', epic: 'phase-1' }];
+    const capture = {
+      repository: 'owner/repo', origin_issue: 42, run_id: 900, run_attempt: 1,
+      plan, fullPlan: plan, operations, registry: identities, phase: 1,
+    };
+    const journal = {
+      schema: ACTIVATION_RECEIPT_SCHEMA, repository: capture.repository,
+      capture_sha256: digest(capture), run_id: 900, run_attempt: 1, parent_fallbacks: [],
+      started: operations.map(operation => operation.id),
+      receipts: operations.map((operation, index) => ({
+        operation_id: operation.id, repository: capture.repository, number: 101 + index,
+        id: 1001 + index, node_id: `I_${index}`, url: `https://github.com/owner/repo/issues/${101 + index}`,
+      })),
+    };
+    expect(buildActivationBindings(capture, journal)).toMatchObject([
+      { label: `squad:${slug}`, epic_label: `squad:${slug}`, agent_id: 'builder' },
+    ]);
+  });
+
+  it('rejects ambiguous certified display-name slugs before producing a plan', () => {
+    const identities = structuredClone(registry);
+    identities.agents.builder.display_name = 'Foo Bar';
+    identities.agents.builder.persistent_name = 'Foo Bar';
+    identities.agents.reviewer.display_name = 'Foo-Bar';
+    identities.agents.reviewer.persistent_name = 'Foo-Bar';
+    expect(() => parse(table(['| build | Example | Foo Bar | builder | None |']),
+      team.replace('Builder', 'Foo Bar').replace('Reviewer', 'Foo-Bar'), identities))
+      .toThrow(/slug.*ambiguous/);
+  });
+
   it('uses each row owner and explicitly maps @copilot without inheriting the prior owner', () => {
     expect(parse().tasks.map((task: any) => [task.id, task.agent_id, task.label])).toEqual([
       ['build', 'builder', 'squad:builder'], ['review', 'reviewer', 'squad:reviewer'],

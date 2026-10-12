@@ -556,7 +556,7 @@ rm -f .github/skills/agentic-workflows/SKILL.md
 
 The nested `workflows/aw.yml` is the canonical package registration. Its
 package boundary prevents unrelated repository skills or agents from being
-auto-discovered. It installs exactly eight workflows, seventeen runtime
+auto-discovered. It installs exactly eight agentic workflows, twenty runtime
 resources, one integrity manifest, and one enlistment skill from the same
 resolved commit. The installed top-level workflow set is:
 
@@ -569,11 +569,14 @@ resolved commit. The installed top-level workflow set is:
 - `squad-bootstrap.md` and `squad-bootstrap.lock.yml`
 - `squad-command-router.md` and `squad-command-router.lock.yml`
 
-The install must also contain these seventeen executable, documentation, and
+The install must also contain these twenty executable, documentation, and
 schema runtime resources (manifest-backed — see
 `workflows/squad-workflows.manifest.json`'s `shared_runtime` list for the
 authoritative source of truth):
 
+- `squad-agent-binding-check.yml`
+- `shared/squad-activation.mjs`
+- `shared/check-agent-binding.mjs`
 - `shared/squad-cast-validator.mjs`
 - `shared/squad-bootstrap-validator.mjs`
 - `shared/squad-improvement-gate.mjs`
@@ -594,9 +597,14 @@ authoritative source of truth):
 
 The package owns every runtime resource. Because native gh-aw package resources
 allow JavaScript guards under `.github/workflows/shared/` but not Markdown or
-JSON at that destination, the package stores those remaining exact bytes under
-`.github/aw/squad/runtime/`. The verifier materializes them to their runtime
+JSON at that destination, nor native workflow YAML destinations, the package
+stores those remaining exact bytes under `.github/aw/squad/runtime/`. The verifier materializes them to their runtime
 paths and rejects any digest mismatch before the bootstrap PR can be opened.
+Nineteen resources materialize under `.github/workflows/shared/`; the native
+binding checker materializes at `.github/workflows/squad-agent-binding-check.yml`.
+All twenty are verified against the same contract.
+A differing pre-existing native checker is preserved and blocks materialization;
+resolve that file conflict before opening the bootstrap PR.
 
 `squad-improvement-worker` is part of this standard install, not a separate
 add-on — it stays dormant until a maintainer approves a governance-scoped
@@ -693,7 +701,7 @@ absent. Do not suppress warnings or use `--approve` to bypass this gate.
 
 Verify the complete source/lock surface. Prefer the manifest-backed verifier
 over a hand-maintained file list, since it checks every one of the eight
-workflows, seventeen runtime resources, the integrity manifest, and the
+workflows, twenty runtime resources, the integrity manifest, and the
 enlistment skill against `workflows/squad-workflows.manifest.json`:
 
 ```bash
@@ -1385,6 +1393,11 @@ pending reservation **before any issue creation**. It receives actual issue IDs
 from the pinned synchronous runtime API. Only its finalizer can publish acceptance
 and Activated lifecycle output, after all operations, IDs, dependencies, owners
 and live labels validate. A green run or pending marker is not acceptance.
+Retry-safe label setup and exact authenticated phase-approval reuse precede
+reservation; admission is rechecked afterward. Rendered issue-body limits are
+validated before reservation. The durable pending marker and started-operation
+journal still precede every issue create. Ambiguous create/crash outcomes remain
+no-create: empty receipts or an error never release a started reservation.
 Finalization and downstream verification also check current API parent links.
 A per-operation body-reference fallback is allowed only when recorded after the
 native parent write returned 404/422 and the parent read remains unavailable
@@ -1460,6 +1473,8 @@ without its own reconciliation is not authenticated merely by passing it to the
 SDK: the packaged checker separately verifies its current API record, prior
 request evidence and unique history head. Standalone legacy parsing is not
 historical attestation.
+Legacy records remain readable and unchanged, but promotion requires independently
+provable correspondence. Missing proof requires explicit current-state reconciliation.
 
 An interrupted run that created issues but never published acceptance may use
 `"source_kind": "pending"` in this same request. `original` must then identify the

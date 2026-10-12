@@ -50,6 +50,7 @@ import {
   validateCompilerActionPins,
   verifyInstall,
   verifyCanonicalManifest,
+  writeLocalTestOwnership,
 } from '../workflows/shared/squad-install-verifier.mjs';
 
 const WORKFLOWS_DIR = join(process.cwd(), 'workflows');
@@ -4092,8 +4093,12 @@ describe('gh-aw: canonical package integrity contract', () => {
     expect(contract.workflows).toHaveLength(8);
     expect(contract.shared_runtime).toHaveLength(RUNTIME_TUPLES.length);
     expect(contract.shared_runtime).toHaveLength(20);
-    expect(ciRuntimeCount?.[1], 'strict compile CI runtime cardinality must match the package manifest')
-      .toBe(String(contract.shared_runtime.length));
+    const sharedResources = contract.shared_runtime.filter((entry: { destination: string }) =>
+      entry.destination.startsWith('.github/workflows/shared/'));
+    expect(ciRuntimeCount?.[1], 'strict compile CI shared-directory count must match materialized destinations')
+      .toBe(String(sharedResources.length));
+    expect(sharedResources).toHaveLength(19);
+    expect(ci).toContain('test -f .github/workflows/squad-agent-binding-check.yml');
     const seedStart = ci.indexOf('mkdir -p .github/workflows');
     const addStart = ci.indexOf('gh aw add --force "$GITHUB_WORKSPACE/workflows"');
     expect(seedStart, 'clean-consumer CI must seed all dispatched peers before gh aw add compiles')
@@ -4110,11 +4115,16 @@ describe('gh-aw: canonical package integrity contract', () => {
       path: 'shared/squad-review-guard.mjs',
       destination: '.github/workflows/shared/squad-review-guard.mjs',
     }));
-    for (const resource of ['squad-activation.mjs', 'check-agent-binding.mjs', 'squad-agent-binding-check.yml']) {
+    for (const resource of ['squad-activation.mjs', 'check-agent-binding.mjs']) {
       expect(contract.shared_runtime).toContainEqual(expect.objectContaining({
         path: `shared/${resource}`, destination: `.github/workflows/shared/${resource}`,
       }));
     }
+    expect(contract.shared_runtime).toContainEqual(expect.objectContaining({
+      path: 'shared/squad-agent-binding-check.yml',
+      package_destination: '.github/aw/squad/runtime/shared/squad-agent-binding-check.yml',
+      destination: '.github/workflows/squad-agent-binding-check.yml',
+    }));
     expect(contract.skills).toHaveLength(SKILL_TUPLES.length);
     expect(contract.skills).toHaveLength(1);
     expect(contract.package).toBe('bradygaster/squad/workflows');
@@ -4147,6 +4157,39 @@ describe('gh-aw: canonical package integrity contract', () => {
     }
     expect(existsSync(join(process.cwd(), 'aw.yml'))).toBe(false);
   }, 120_000);
+
+  it('installs through the actual pinned native manifest boundary and verifies the materialized checker', () => {
+    const root = createTestWorkspace('gh-aw-native-package-');
+    execFileSync('git', ['init', '--quiet'], { cwd: root });
+    execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/example/squad-consumer.git'], { cwd: root });
+    for (const name of WORKFLOW_NAMES) {
+      copyInto(root, `workflows/package/${name}.md`, `.github/workflows/${name}.md`);
+    }
+    execFileSync('gh', ['aw', 'add', '--force', WORKFLOWS_DIR], {
+      cwd: root, stdio: 'pipe', timeout: 90_000,
+    });
+    unlinkSync(join(root, '.github/skills/agentic-workflows/SKILL.md'));
+    const destination = '.github/workflows/squad-agent-binding-check.yml';
+    expect(existsSync(join(root, destination))).toBe(false);
+    writeLocalTestOwnership(root, revisionA);
+    materializeRuntime(root);
+    expect(readText(join(root, destination))).toBe(readText(join(WORKFLOWS_DIR, 'shared/squad-agent-binding-check.yml')));
+    compileWithPinnedActions(root);
+    expect(verifyInstall(root, { expectedRevision: revisionA }).failures).toEqual([]);
+    writeFileSync(join(root, destination), 'tampered native checker\n');
+    expect(verifyInstall(root, { expectedRevision: revisionA }).failures.join('\n'))
+      .toContain(destination);
+    expect(() => materializeRuntime(root)).toThrow(/refusing to overwrite/);
+    expect(readText(join(root, destination))).toBe('tampered native checker\n');
+  }, 120_000);
+
+  it('refuses to overwrite an unrelated pre-existing native checker during materialization', () => {
+    const root = makeConsumer(revisionA, false);
+    const destination = join(root, '.github/workflows/squad-agent-binding-check.yml');
+    writeFileSync(destination, 'name: Existing unrelated workflow\n');
+    expect(() => materializeRuntime(root)).toThrow(/refusing to overwrite/);
+    expect(readText(destination)).toBe('name: Existing unrelated workflow\n');
+  });
 
   it('accepts a coherent consumer with the exact ownership cardinality', () => {
     const root = makeConsumer();
