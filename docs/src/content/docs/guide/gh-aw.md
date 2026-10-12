@@ -1403,6 +1403,24 @@ A per-operation body-reference fallback is allowed only when recorded after the
 native parent write returned 404/422 and the parent read remains unavailable
 with 404/422. An available, contradictory parent always rejects the binding.
 
+Current-run completion is checked **inside the trusted writer job**: the exact
+synchronous comment-publication response must identify the expected repository,
+origin, workflow bot and body. Its exact API readback, live bindings and sole
+history head are checked before lifecycle publication and successful completion.
+Reconciliation predecessors are fetched through their explicit ID/hash links as
+dependencies, never counted as this run's output. Missing or ambiguous publication
+responses fail even if another run published valid output at the same time.
+Run IDs asserted in comment bodies, time windows, artifact names and logs grant
+no completion authority. Existing validated acceptance/reconciliation retries
+remain explicit unchanged/no-create operations, not new publication claims.
+The native **Squad Agent Binding Check** is a separate historical current-state
+audit over repository comments, including old predecessors. Its success (including
+an empty history) does **not** prove that the triggering run produced output.
+These are point-in-time API checks, not a transaction or a guarantee against
+later edits; changed historical state can fail a subsequent audit.
+Authorized dispatch and the existing `github.workflow_sha` trusted-code boundary
+are unchanged; no default-branch-only restriction or additional permission is imposed.
+
 Supported tables have unique stable `#`, `Title`, `Owner`, `Agent ID`, and
 `Depends On` columns. Granular implementation tables use `Agent` instead of
 `Owner` and additionally require `Epic`. Use comma-separated stable task IDs for

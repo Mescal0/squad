@@ -14,9 +14,9 @@
       "source": "workflows/package/squad.md",
       "destination": ".github/workflows/squad.md",
       "lock": ".github/workflows/squad.lock.yml",
-      "source_sha256": "f9cba967f09d1fde5706e770522d47958c5d9ca66633715c5aa17f6523f80cef",
-      "lock_sha256": "f4c602bfe0c82b5be0bac43a90c9426566cb7b6dffd1ead4fce9fcc4ba9182f8",
-      "package_lock_sha256": "44882baa454f6859e321c2d9fbe80720a2cece9e93abf110dd61a3824e2d955e"
+      "source_sha256": "911d20204f70def43625b9e6fd66e07b0da012122e4827cfc0165531042d57f3",
+      "lock_sha256": "e3358d8e2c51ce00c2bbc7509394bc4f17aed7d21bcc4be2629dcc58a7ddc0f5",
+      "package_lock_sha256": "82eee8e33a5ad0b6f85070676b16d46e20076348bc99bb98ec990f4a0c42fa7f"
     },
     {
       "name": "squad-implement-worker",
@@ -88,8 +88,8 @@
       "workflows": [
         {
           "name": "squad",
-          "lock_sha256": "f4c602bfe0c82b5be0bac43a90c9426566cb7b6dffd1ead4fce9fcc4ba9182f8",
-          "package_lock_sha256": "44882baa454f6859e321c2d9fbe80720a2cece9e93abf110dd61a3824e2d955e"
+          "lock_sha256": "e3358d8e2c51ce00c2bbc7509394bc4f17aed7d21bcc4be2629dcc58a7ddc0f5",
+          "package_lock_sha256": "82eee8e33a5ad0b6f85070676b16d46e20076348bc99bb98ec990f4a0c42fa7f"
         },
         {
           "name": "squad-implement-worker",
@@ -136,7 +136,7 @@
       "package_destination": ".github/aw/squad/runtime/shared/squad-agent-binding-check.yml",
       "destination": ".github/workflows/squad-agent-binding-check.yml",
       "ownership": "manifest",
-      "sha256": "d789689d0e110bbc75fc42a1def649e9e9ec713a50ec8acc33e174b1a29e4c17"
+      "sha256": "29445e87b5ee6a185d52b3890ba662acffa2ba2747d3359ed928514f5dd2e925"
     },
     {
       "path": "shared/squad-activation.mjs",
@@ -144,7 +144,7 @@
       "package_destination": ".github/workflows/shared/squad-activation.mjs",
       "destination": ".github/workflows/shared/squad-activation.mjs",
       "ownership": "manifest",
-      "sha256": "d2509a6456802ee6c215676812857a6ec6da1c0b98066fa68949c435e68fb0e4"
+      "sha256": "a6f73d4ed2fd274efe30623803c52e29fd14072c58dcd7c7d3e2a1a0dc54d1b6"
     },
     {
       "path": "shared/check-agent-binding.mjs",
@@ -152,7 +152,7 @@
       "package_destination": ".github/workflows/shared/check-agent-binding.mjs",
       "destination": ".github/workflows/shared/check-agent-binding.mjs",
       "ownership": "manifest",
-      "sha256": "059410e62d02effa9299382149f7626f9b46e333e55ebcd42fad55e376473f08"
+      "sha256": "41b0d33d28c272800081ed4c21966430821e55ced4095c9fe76e14e4763688ca"
     },
     {
       "path": "shared/squad-review-guard.mjs",

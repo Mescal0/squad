@@ -1,7 +1,12 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createRequire } from 'node:module';
+import { compileFunction, constants } from 'node:vm';
+import { parse } from 'yaml';
+import { createFirstInstallFixture } from './helpers/gh-aw-install-fixture.js';
+import { diagnosticRuntime, fetchDiagnosticRuntime } from './helpers/gh-aw-diagnostic-runtime.js';
 import {
   buildActivationBindings,
   correctDependencyReferences,
@@ -132,6 +137,7 @@ function fixture({ count = 2, epic = false } = {}) {
     update?: (params: any) => void;
     pendingIdMissing?: boolean;
     parentStatus?: number;
+    publicationResponse?: (value: any) => any;
   } = {};
   const reads = new Map<number, number>();
   let nextComment = 1000;
@@ -170,6 +176,9 @@ function fixture({ count = 2, epic = false } = {}) {
         hooks.comment?.(params.body);
         const created = comment(nextComment++, params.body);
         comments.set(created.id, created);
+        if (params.body.includes('Activation bindings:') && hooks.publicationResponse) {
+          return { data: hooks.publicationResponse(clone(created)) };
+        }
         return { data: hooks.pendingIdMissing && params.body.includes('squad-activation-pending/v1')
           ? { ...clone(created), id: undefined } : clone(created) };
       }),
@@ -1032,6 +1041,256 @@ function phasedFixture(sharedEpic = false) {
   return { ...f, activate, bridge, latest };
 }
 
+describe('trusted synchronous publication completion (source and strict-compiled jobs)', () => {
+  let lock: any;
+  let runtimeSources: Map<string, string>;
+  beforeAll(async () => {
+    const installed = createFirstInstallFixture('a'.repeat(40), 'package');
+    lock = parse(installed.consumerFiles.get('.github/workflows/squad.lock.yml')!.toString());
+    runtimeSources = await fetchDiagnosticRuntime(['index.cjs', 'sanitize_content.cjs']);
+  }, 180_000);
+
+  function compiled(f: ReturnType<typeof fixture>) {
+    const trusted = join(f.root, '.squad-activation-trusted-base');
+    mkdirSync(join(trusted, '.github/workflows'), { recursive: true });
+    cpSync(join(process.cwd(), 'workflows/shared'), join(trusted, '.github/workflows/shared'), { recursive: true });
+    const outputs: Record<string, string> = {};
+    const logs: string[] = [];
+    const creationJob: any = Object.values(lock.jobs).find((job: any) =>
+      job.steps.some((step: any) => step.name === 'Setup pinned issue creation API'));
+    const runtime = diagnosticRuntime(runtimeSources, f.root, [], {
+      ...Object.fromEntries(Object.entries(creationJob.env ?? {}).filter(([, value]) => !String(value).includes('${{'))),
+      GITHUB_REPOSITORY: repository, ...f.env,
+    });
+    const api = runtime.load('js/index.cjs');
+    const github = { ...f.github, hook: { before: () => {} }, rest: {
+      ...f.github.rest, issues: { ...f.github.rest.issues,
+        create: async (params: any) => {
+          cpSync(join(f.root, 'squad-activation-receipts.json'), f.journalPath);
+          return { data: (await f.createIssue(params)).issue };
+        },
+      },
+    } };
+    const run = async (name: string) => {
+      cpSync(join(f.root, '.squad'), join(trusted, '.squad'), { recursive: true });
+      const job: any = Object.values(lock.jobs).find((job: any) => job.steps.some((step: any) => step.name === name));
+      expect(job.if).toContain("needs.safe_outputs.result == 'success'");
+      const step = job.steps.find((step: any) => step.name === name);
+      const core = {
+        info: (message: string) => logs.push(message), debug: vi.fn(), warning: vi.fn(), error: vi.fn(),
+        setOutput: (key: string, value: string) => { outputs[key] = value; },
+        setFailed: (message: string) => { throw new Error(message); },
+      };
+      await compileFunction(`return (async () => { ${step.with.script} })();`,
+        ['github', 'context', 'core', 'process', 'require', 'exec', 'io', 'getOctokit'],
+        { importModuleDynamically: constants.USE_MAIN_CONTEXT_DEFAULT_LOADER })(
+        github, f.context, core, { env: {
+          ...f.env, GITHUB_WORKSPACE: f.root, RUNNER_TEMP: f.root, GH_AW_AGENT_OUTPUT: f.outputPath,
+          CAPTURE_ARTIFACT_ID: '800', RECEIPT_ARTIFACT_ID: '801',
+        } }, (name: string) => {
+          if (name === join(f.root, 'gh-aw/actions/index.cjs')) return api;
+          if (name === join(f.root, 'gh-aw/actions/sanitize_content.cjs')) return runtime.load('js/sanitize_content.cjs');
+          return createRequire(import.meta.url)(name);
+        }, {}, {}, () => github,
+      );
+    };
+    return {
+      logs, outputs, trusted,
+      prepare: async () => {
+        await run('Freeze and validate activation inputs');
+        return outputs.fresh === 'false' ? { existingAcceptanceId: true }
+          : JSON.parse(readFileSync(join(f.root, 'squad-activation-capture.json'), 'utf8'));
+      },
+      create: async (_capture: any) => {
+        await run('Reserve activation and record actual create results');
+        return JSON.parse(readFileSync(join(f.root, 'squad-activation-receipts.json'), 'utf8'));
+      },
+      finalize: async (_capture: any, _journal: any) => run('Validate actual bindings before publishing acceptance'),
+      reconcile: async () => {
+        writeFileSync(f.outputPath, JSON.stringify({ items: [{ type: 'reconcile_activation', action: 'reconcile' }] }));
+        await run('Validate authorization and reconcile existing dependency references');
+      },
+    };
+  }
+
+  for (const implementation of ['source', 'compiled']) {
+    const driver = (f: ReturnType<typeof fixture>) => implementation === 'compiled' ? compiled(f) : {
+      ...f, reconcile: () => reconcileActivation({ github: f.github, context: f.context, env: f.env, root: f.root }),
+    };
+
+    it(`${implementation}: completes the actual publication and retries without claiming a new output`, async () => {
+      const f = fixture();
+      const run = driver(f);
+      const capture = await run.prepare();
+      await run.finalize(capture, await run.create(capture));
+      const accepted = f.accepted()[0];
+      expect(accepted).toBeDefined();
+      expect(f.github.rest.issues.getComment).toHaveBeenCalledWith({
+        ...f.context.repo, comment_id: accepted.id,
+      });
+      f.env.GITHUB_RUN_ATTEMPT = '2';
+      const writes = f.writes.length;
+      expect(await run.prepare()).toHaveProperty('existingAcceptanceId');
+      expect(f.writes).toHaveLength(writes);
+      expect(f.createIssue).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      ['missing response', () => undefined],
+      ['empty response', () => ({})],
+      ['wrong repository', (receipt: any) => ({ ...receipt, issue_url: receipt.issue_url.replace('owner/repo', 'other/repo') })],
+      ['wrong origin', (receipt: any) => ({ ...receipt, issue_url: receipt.issue_url.replace('/42', '/43') })],
+      ['wrong bot ID', (receipt: any) => ({ ...receipt, user: { ...bot, id: 42 } })],
+      ['wrong bot login', (receipt: any) => ({ ...receipt, user: { ...bot, login: 'other[bot]' } })],
+      ['wrong bot type', (receipt: any) => ({ ...receipt, user: { ...bot, type: 'User' } })],
+      ['self-claimed run', (receipt: any) => ({ ...receipt, body: receipt.body.replace('"run_id":900', '"run_id":901') })],
+      ['another attempt', (receipt: any) => ({ ...receipt, body: receipt.body.replace('"run_attempt":1', '"run_attempt":2') })],
+      ['old comment ID', (receipt: any) => ({ ...receipt, id: 10 })],
+    ])(`${implementation}: rejects %s rather than borrowing a valid concurrent result`, async (_name, mutate) => {
+      const f = fixture();
+      const run = driver(f);
+      const capture = await run.prepare();
+      const journal = await run.create(capture);
+      // A real, valid record remains visible in the API at the same origin/time,
+      // but this invocation has no usable write response.
+      f.hooks.publicationResponse = mutate as (value: any) => any;
+      await expect(run.finalize(capture, journal)).rejects.toThrow(/publication receipt/);
+      expect(f.accepted()).toHaveLength(1);
+      expect([...f.comments.values()].some(comment => parseStructuredData(comment.body)?.squad_artifact === 'lifecycle-state'))
+        .toBe(false);
+    });
+
+    it(`${implementation}: rejects same-origin/time concurrent publication and a different-attempt receipt`, async () => {
+      const f = fixture();
+      const run = driver(f);
+      const capture = await run.prepare();
+      const journal = await run.create(capture);
+      f.hooks.comment = body => {
+        if (!body.includes('Activation bindings:')) return;
+        const other = f.comment(5000, body.replace('"run_id":900', '"run_id":901'));
+        f.comments.set(other.id, other);
+      };
+      await expect(run.finalize(capture, journal)).rejects.toThrow(/competing/);
+      expect(f.accepted()).toHaveLength(2);
+      f.hooks.comment = undefined;
+      f.env.GITHUB_RUN_ATTEMPT = '2';
+      const before = f.writes.length;
+      await expect(run.finalize(capture, journal)).rejects.toThrow(/command\/run\/attempt/);
+      expect(f.writes).toHaveLength(before);
+    });
+
+    it(`${implementation}: unrelated valid history cannot replace missing current output`, async () => {
+      const f = fixture();
+      const run = driver(f);
+      const capture = await run.prepare();
+      const journal = await run.create(capture);
+      f.hooks.publicationResponse = receipt => {
+        f.comments.delete(receipt.id);
+        f.comments.set(5000, f.comment(5000, receipt.body.replace('"run_id":900', '"run_id":899')));
+        return undefined;
+      };
+      await expect(run.finalize(capture, journal)).rejects.toThrow(/publication receipt/);
+      // Independent historical validity is deliberately not positive completion.
+      expect(await runCollectedChecker(f, [f.comments.get(5000)!])).toContain('Validated 2 activation bindings.');
+      expect([...f.comments.values()].some(comment => parseStructuredData(comment.body)?.squad_artifact === 'lifecycle-state'))
+        .toBe(false);
+    });
+
+    it.each(['body', 'identity', 'bot', 'repository'])(
+      `${implementation}: checks exact publication readback after a valid response (%s)`, async mutation => {
+        const f = fixture();
+        const run = driver(f);
+        const capture = await run.prepare();
+        const journal = await run.create(capture);
+        f.hooks.publicationResponse = receipt => {
+          const current = f.comments.get(receipt.id)!;
+          if (mutation === 'body') current.body += '\nConcurrent edit';
+          if (mutation === 'identity') current.id = 5000;
+          if (mutation === 'bot') current.user = clone(operator);
+          if (mutation === 'repository') current.issue_url = current.issue_url.replace(repository, 'other/repo');
+          return receipt;
+        };
+        await expect(run.finalize(capture, journal)).rejects.toThrow(/publication receipt/);
+        expect([...f.comments.values()].some(comment => parseStructuredData(comment.body)?.squad_artifact === 'lifecycle-state'))
+          .toBe(false);
+      },
+    );
+
+    it(`${implementation}: accepts authorized dispatch without a default-only revision restriction`, async () => {
+      const f = fixture();
+      f.env.GITHUB_EVENT_NAME = 'workflow_dispatch';
+      f.env.SQUAD_WORKFLOW_SHA = 'b'.repeat(40);
+      Object.assign(f.context.payload, { inputs: { command: 'activate', issue_number: '42' } });
+      const run = driver(f);
+      const capture = await run.prepare();
+      await run.finalize(capture, await run.create(capture));
+      expect(f.accepted()).toHaveLength(1);
+    });
+
+    it(`${implementation}: reconciliation verifies its own response, not its predecessor as output`, async () => {
+      const f = recovery();
+      const run = driver(f);
+      f.hooks.publicationResponse = () => clone(f.original);
+      await expect(run.reconcile()).rejects.toThrow(/publication receipt/);
+      expect(f.accepted()).toHaveLength(2);
+      expect(f.createIssue).not.toHaveBeenCalled();
+    });
+
+    it(`${implementation}: accepts reconciliation and explicit transitive phase dependencies`, async () => {
+      const f = phasedFixture();
+      const run = driver(f);
+      for (const phase of [1, 2, 3]) {
+        f.activate(phase);
+        const capture = await run.prepare();
+        await run.finalize(capture, await run.create(capture));
+        expect(parseStructuredData(f.latest().body).phases).toEqual(Array.from({ length: phase }, (_, i) => i + 1));
+        if (phase < 3) await f.bridge(f.latest());
+      }
+      expect(f.createIssue).toHaveBeenCalledTimes(6);
+      const r = recovery();
+      await driver(r).reconcile();
+      expect(r.accepted()).toHaveLength(2);
+      expect(r.createIssue).not.toHaveBeenCalled();
+    });
+
+    it.each(['missing', 'changed', 'wrong-bot', 'wrong-repository'])(
+      `${implementation}: rejects %s explicit predecessor without treating it as output`, async mutation => {
+        const f = phasedFixture();
+        const run = driver(f);
+        const first = await run.prepare();
+        await run.finalize(first, await run.create(first));
+        const { result: bridge } = await f.bridge(f.latest());
+        f.activate(2);
+        const second = await run.prepare();
+        const journal = await run.create(second);
+        const predecessor = f.comments.get(bridge.id)!;
+        if (mutation === 'missing') f.comments.delete(bridge.id);
+        if (mutation === 'changed') predecessor.body += '\nChanged';
+        if (mutation === 'wrong-bot') predecessor.user = clone(operator);
+        if (mutation === 'wrong-repository') predecessor.issue_url = predecessor.issue_url.replace(repository, 'other/repo');
+        const writes = f.writes.length;
+        await expect(run.finalize(second, journal)).rejects.toThrow(/prior-phase|workflow-bot|ancestry/);
+        // Failed prepublication or postpublication checks never publish lifecycle completion.
+        expect(f.writes.slice(writes).some(write => write.params.body?.includes('"squad_artifact":"lifecycle-state"'))).toBe(false);
+      },
+    );
+  }
+
+  it('mutation: removing the in-job publication check admits the very same missing response', async () => {
+    const f = fixture();
+    const run = compiled(f);
+    const path = join(run.trusted, '.github/workflows/shared/squad-activation.mjs');
+    const source = readFileSync(path, 'utf8');
+    expect(source).toContain('return checkActivationPublication({ github, context, root, receipt, expectedBody: body });');
+    writeFileSync(path, source.replace(
+      'return checkActivationPublication({ github, context, root, receipt, expectedBody: body });', 'return receipt;',
+    ));
+    const capture = await run.prepare();
+    f.hooks.publicationResponse = () => undefined;
+    await expect(run.finalize(capture, await run.create(capture))).resolves.toBeUndefined();
+  });
+});
+
 function addValidation(f: ReturnType<typeof phasedFixture>) {
   const plan = f.comments.get(10)!;
   f.comments.set(11, f.comment(11, [
@@ -1209,6 +1468,46 @@ async function runCollectedChecker(f: ReturnType<typeof fixture>, comments: Arra
 }
 
 describe('live downstream verification', () => {
+  it.each(['.github/workflows/squad-agent-binding-check.yml', 'workflows/shared/squad-agent-binding-check.yml'])(
+    '%s executes a historical audit, retaining old explicit predecessors without run attestation', async path => {
+      const f = phasedFixture();
+      const first = await f.prepare();
+      await f.finalize(first, await f.create(first));
+      const original = f.latest();
+      await f.bridge(original);
+      f.activate(2);
+      const second = await f.prepare();
+      await f.finalize(second, await f.create(second));
+      const workflow = parse(readFileSync(join(process.cwd(), path), 'utf8'));
+      expect(workflow.jobs.check.name).toContain('not current-run completion');
+      const collector = workflow.jobs.check.steps.find((step: any) => step.with?.script);
+      const files = new Map<string, string>();
+      const paginate = vi.fn(async (_method: any, params: any) => {
+        expect(params).not.toHaveProperty('since');
+        return clone([...f.comments.values()]);
+      });
+      await compileFunction(`return (async () => { ${collector.with.script} })();`,
+        ['github', 'context', 'process', 'require'])(
+        { paginate, rest: { issues: { listCommentsForRepo: vi.fn() } } },
+        { repo: f.context.repo, payload: { workflow_run: {
+          id: 999, run_attempt: 2, run_started_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:01:00Z',
+        } } },
+        { env: { RUNNER_TEMP: f.root } },
+        (name: string) => {
+          expect(name).toBe('node:fs');
+          return { writeFileSync: (path: string, body: string) => files.set(path, body) };
+        },
+      );
+      const records = JSON.parse(files.get(join(f.root, 'activation-comments.json'))!);
+      expect(records.map((record: any) => record.id)).toContain(original.id);
+      expect(records.map((record: any) => record.id)).toContain(f.latest().id);
+      expect(await runCollectedChecker(f, records)).toContain('Validated 3 activation bindings.');
+      expect(await runCollectedChecker(f, [])).toContain(
+        'No historical activation artifact found; no current-run completion is asserted.',
+      );
+    },
+  );
+
   it.each([null, ['task:unknown'], ['task:1', 'task:1']])('rejects malformed parent fallback evidence: %j', async fallbacks => {
     const f = fixture();
     const capture = await f.prepare();

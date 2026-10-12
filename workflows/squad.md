@@ -299,6 +299,8 @@ safe-outputs:
             path: .squad-activation-trusted-base
         - name: Validate authorization and reconcile existing dependency references
           uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+          env:
+            SQUAD_WORKFLOW_SHA: ${{ github.workflow_sha }}
           with:
             script: |
               const { join } = require('node:path');
@@ -313,7 +315,10 @@ safe-outputs:
               const root = join(process.env.GITHUB_WORKSPACE, '.squad-activation-trusted-base');
               const activation = await import(pathToFileURL(join(root,
                 '.github/workflows/shared/squad-activation.mjs')).href);
-              await activation.reconcileActivation({ github, context, env: process.env, root });
+              const result = await activation.reconcileActivation({ github, context, env: process.env, root });
+              core.info(result.unchanged
+                ? 'Existing validated reconciliation retained; no new publication is asserted.'
+                : 'This execution published and independently checked its exact reconciliation response.');
     activate-plan:
       name: Create and finalize validated activation
       description: Activate the exact plan comment through the trusted deterministic writer. Do not call native issue creation, acceptance or lifecycle tools for activation.
@@ -422,6 +427,7 @@ safe-outputs:
                 journal: JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'squad-activation-receipts.json'), 'utf8')),
                 receiptArtifactId: Number(process.env.RECEIPT_ARTIFACT_ID),
               });
+              core.info('This execution published and independently checked its exact activation response.');
     cast-failure:
       name: Fail incomplete Cast
       description: "Fail a Cast run from an emitted factual failure record."

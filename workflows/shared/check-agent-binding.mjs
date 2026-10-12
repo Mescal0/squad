@@ -1014,6 +1014,77 @@ async function fetchLabels(repo, issues, token) {
   return labels;
 }
 
+/**
+ * The caller must hold the response of its own synchronous createComment call.
+ * Neither a disk manifest nor a comment's claimed run IDs can supply this receipt.
+ */
+export async function checkActivationPublication({ github, context, root, receipt, expectedBody }) {
+  const repository = `${context.repo.owner}/${context.repo.repo}`;
+  const origin = Number(context.payload.inputs?.issue_number ?? context.payload.issue?.number);
+  const checkIdentity = comment => {
+    if (!Number.isSafeInteger(comment?.id) || comment.id <= 0 ||
+      comment.user?.id !== 41898282 || comment.user?.login !== 'github-actions[bot]' ||
+      comment.user?.type !== 'Bot' ||
+      comment.issue_url !== `https://api.github.com/repos/${repository}/issues/${origin}` ||
+      comment.html_url !== `https://github.com/${repository}/issues/${origin}#issuecomment-${comment.id}` ||
+      comment.body !== expectedBody) {
+      throw new Error('Activation publication receipt is missing or differs from the exact trusted write');
+    }
+  };
+  checkIdentity(receipt);
+  const current = (await github.rest.issues.getComment({ ...context.repo, comment_id: receipt.id })).data;
+  checkIdentity(current);
+  if (current.id !== receipt.id) throw new Error('Activation publication readback changed comment identity');
+  const artifact = parseStructuredData(current.body);
+  if (!ACTIVATION_ARTIFACTS.has(artifact?.squad_artifact) || artifact.origin_issue !== origin) {
+    throw new Error('Activation publication has no matching activation envelope');
+  }
+  const { verifyPublishedActivation, verifyReconciliationRequest, selectionEvidence,
+    frozenAssignments, activationHistoryHead } = await import('./squad-activation.mjs');
+  let registry;
+  let assignments;
+  if (artifact.squad_artifact === 'activation-reconciled') {
+    const metadata = readChainSection(current.body, 'Activation reconciliation');
+    const verified = await verifyReconciliationRequest({
+      github, context, root,
+      requestCommentId: metadata.request_comment_id, requestSha256: metadata.request_sha256,
+    });
+    if (verified.snapshots.some(snapshot => snapshot.body !== snapshot.after)) {
+      throw new Error('Activation publication dependencies are not corrected');
+    }
+    registry = verified.registry;
+    assignments = frozenAssignments(verified.fullPlan);
+    const selected = selectActivationRecord([verified.original, current], registry, {
+      repository, originIssue: origin, reconciliations: [selectionEvidence(verified)], epicAssignments: assignments,
+    });
+    if (selected?.id !== current.id) throw new Error('Activation publication is not the verified reconciliation');
+  } else {
+    const verified = await verifyPublishedActivation({ github, context, root, comment: current });
+    registry = verified.registry;
+    assignments = verified.assignments;
+  }
+  const labels = new Map();
+  for (const issue of new Set(artifact.bindings.flatMap(binding =>
+    [extractIssueNumber(binding.issue), extractIssueNumber(binding.epic_issue)]))) {
+    const actual = (await github.rest.issues.get({ ...context.repo, issue_number: issue })).data;
+    if (actual.pull_request || actual.number !== issue ||
+      actual.url !== `https://api.github.com/repos/${repository}/issues/${issue}`) {
+      throw new Error('Activation publication references an invalid current issue');
+    }
+    labels.set(issue, new Set(actual.labels.map(label => normalize(typeof label === 'string' ? label : label.name))));
+  }
+  assertAcceptedOnlyLabelWording(current.body, artifact.squad_artifact);
+  validateActivation(artifact, parseRoster(await readFile(join(root, '.squad/team.md'), 'utf8')),
+    labels, origin, { repository, registry: parseAgentRegistry(registry), epicAssignments: assignments });
+  const history = await github.paginate(github.rest.issues.listComments, {
+    ...context.repo, issue_number: origin, per_page: 100,
+  });
+  if (activationHistoryHead(history, origin, repository) !== current.id) {
+    throw new Error('Activation publication is not the sole current history head');
+  }
+  return current;
+}
+
 export async function main() {
   const args = Object.fromEntries(process.argv.slice(2).map(arg => {
     const [key, ...value] = arg.replace(/^--/, '').split('=');
@@ -1112,7 +1183,8 @@ export async function main() {
     const head = activationHistoryHead(current, origin, args.repo);
     if (!verifiedIds.has(head)) throw new Error('Current activation head was not independently verified from the collected input');
   }
-  console.log(checked === 0 ? 'No activation artifact found; skipping.' : `Validated ${checked} activation bindings.`);
+  console.log(checked === 0 ? 'No historical activation artifact found; no current-run completion is asserted.'
+    : `Validated ${checked} activation bindings.`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

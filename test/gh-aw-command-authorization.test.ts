@@ -394,6 +394,16 @@ describe('compiled Squad command authorization boundary (#2185)', () => {
     expect(result.mutations).toEqual([]);
   });
 
+  it.each(['activate', 'plan accept', 'plan activate', `reconcile activation 30 ${'a'.repeat(64)}`])(
+    'compiled guard refuses absent current output for %s, regardless of historical records', async command => {
+      for (const items of [[], [{ type: 'noop', message: 'Already completed elsewhere' }]]) {
+        const result = await runGuard({ payload: payloadFor(command), permission: 'admin', items });
+        expect(result.failures.join('\n')).toMatch(/requires|requires exactly/i);
+        expect(result.mutations).toEqual([]);
+      }
+    },
+  );
+
   it('accepts real pinned MCP requests through serialized plan output and the compiled writers', async () => {
     const data = { squad_artifact: 'plan', schema_version: '1', origin_issue: 42, phases: [] };
     const body = lifecycleFromTemplate(installedDispatcher, 'plan').replace('@contributor', 'Contributor');

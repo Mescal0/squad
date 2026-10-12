@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   check:
+    name: Historical bindings (not current-run completion)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -19,21 +20,21 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: 22
-      - name: Collect activation records without changing them
+      - name: Collect historical activation records (not run outputs)
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const fs = require('node:fs');
-            const run = context.payload.workflow_run;
+            // Only the synchronous trusted writer verifies current-run publication.
+            // Preserve complete history here, including explicit predecessor records.
             const comments = await github.paginate(github.rest.issues.listCommentsForRepo, {
-              ...context.repo, since: run.run_started_at, per_page: 100,
+              ...context.repo, per_page: 100,
             });
             const records = comments
-              .filter(comment => new Date(comment.created_at) <= new Date(run.updated_at))
               .filter(comment => /"squad_artifact"\s*:\s*"(?:activated|phases-activated|plan-accepted|phases-accepted|activation-reconciled)"/.test(comment.body ?? ''))
               .map(comment => ({ id: comment.id, body: comment.body, issue: Number(comment.issue_url.split('/').at(-1)) }));
             fs.writeFileSync(`${process.env.RUNNER_TEMP}/activation-comments.json`, JSON.stringify(records));
-      - name: Validate current bindings and explicitly authorized reconciliation
+      - name: Audit historical bindings without asserting current-run completion
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-

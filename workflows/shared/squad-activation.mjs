@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { readFileSync, writeFileSync } from 'node:fs';
 import {
-  extractIssueNumber, parseAgentRegistry, parsePendingReservation, parseRoster, parseStructuredData, selectActivationRecord,
+  checkActivationPublication, extractIssueNumber, parseAgentRegistry, parsePendingReservation, parseRoster, parseStructuredData, selectActivationRecord,
   validateActivation, validateCastingPairFiles,
 } from './check-agent-binding.mjs';
 import { authorizeSquadCommand, classifySquadCommand } from './squad-command-contract.mjs';
@@ -630,6 +630,7 @@ async function revalidateCapture({ github, context, env, root, capture }) {
     const verified = await verifyReconciliationRequest({ github, context, root,
       requestCommentId: capture.prior.request_comment_id, requestSha256: capture.prior.request_sha256 });
     const selected = verified.comments.find(comment => comment.id === capture.prior.reconciliation_comment_id);
+    requireWorkflowRecord(selected, capture.repository, capture.origin_issue);
     requireThat(selected && digest(selected.body) === capture.prior.reconciliation_sha256 &&
       digest(verified.original.body) === capture.prior.source_sha256 &&
       verified.snapshots.every(snapshot => snapshot.body === snapshot.after) &&
@@ -954,11 +955,24 @@ export async function finalizeActivation({ github, context, env, root, capture, 
     '', 'Activation evidence:', '```json', JSON.stringify(evidence), '```',
     '', 'Structured data:', '```json', JSON.stringify(recordEnvelope), '```',
   ].join('\n');
-  await github.rest.issues.createComment({ ...context.repo, issue_number: capture.origin_issue, body });
+  await publishActivation({ github, context, env, root, body });
   await upsertActivationLifecycle({ github, context, origin: capture.origin_issue,
     fullPlan: capture.fullPlan, phases: artifact.phases,
     command: `/squad ${capture.command}${capture.phase === null ? '' : ` phase ${capture.phase}`}` });
   return evidence;
+}
+
+async function publishActivation({ github, context, env, root, body }) {
+  requireThat(positive(Number(env.GITHUB_RUN_ID)) && positive(Number(env.GITHUB_RUN_ATTEMPT)) &&
+    SHA.test(env.SQUAD_WORKFLOW_SHA ?? ''), 'trusted publication run/attempt/workflow identity is unavailable');
+  // Keep the authenticated write response in this execution. Historical searches,
+  // uploaded artifacts and self-asserted run fields never substitute for it.
+  const receipt = (await github.rest.issues.createComment({
+    ...context.repo,
+    issue_number: Number(context.payload.inputs?.issue_number ?? context.payload.issue?.number),
+    body,
+  })).data;
+  return checkActivationPublication({ github, context, root, receipt, expectedBody: body });
 }
 
 async function upsertActivationLifecycle({ github, context, origin, fullPlan, phases, command }) {
@@ -1064,7 +1078,7 @@ export async function verifyPublishedActivation({ github, context, root, comment
   const artifact = parseStructuredData(comment.body);
   const evidence = jsonBlock(comment.body, 'Activation evidence');
   const repository = `${context.repo.owner}/${context.repo.repo}`;
-  requireThat(comment.user?.id === BOT_ID && comment.user?.type === 'Bot' &&
+  requireThat(comment.user?.id === BOT_ID && comment.user?.login === 'github-actions[bot]' && comment.user?.type === 'Bot' &&
     comment.issue_url === `https://api.github.com/repos/${repository}/issues/${artifact.origin_issue}`,
   'published activation must be a workflow-bot record on this origin');
   requireThat(evidence.schema === 'squad-activation-finalization/v1' &&
@@ -1110,6 +1124,7 @@ export async function verifyPublishedActivation({ github, context, root, comment
     const supplement = (await github.rest.issues.getComment({
       ...context.repo, comment_id: link.reconciliation_comment_id,
     })).data;
+    requireWorkflowRecord(supplement, repository, artifact.origin_issue);
     requireThat(supplement && digest(supplement.body) === link.reconciliation_sha256,
       'published prior-phase supplement changed');
     const metadata = jsonBlock(supplement.body, 'Activation reconciliation');
@@ -1349,6 +1364,7 @@ export async function verifyReconciliationRequest({
     exactKeys(predecessor, ['source_comment_id', 'source_sha256', 'reconciliation_comment_id', 'reconciliation_sha256'],
       'reconciliation predecessor is malformed');
     const supplement = comments.find(item => item.id === predecessor.reconciliation_comment_id);
+    requireWorkflowRecord(supplement, repository, request.origin_issue);
     requireThat(supplement && digest(supplement.body) === predecessor.reconciliation_sha256,
       'reconciliation predecessor supplement is missing or changed');
     const metadata = jsonBlock(supplement.body, 'Activation reconciliation');
@@ -1393,6 +1409,7 @@ export async function reconcileActivation({ github, context, env, root }) {
       jsonBlock(comment.body, 'Activation reconciliation').supersedes_comment_id === verified.original.id);
   requireThat(existing.length <= 1, 'competing reconciliation records require resolution');
   if (existing.length) {
+    requireWorkflowRecord(existing[0], verified.request.repository, verified.request.origin_issue);
     selectActivationRecord([verified.original, existing[0]], verified.registry, {
       repository: verified.request.repository, originIssue: verified.request.origin_issue,
       reconciliations: [selectionEvidence(verified)], epicAssignments: frozenAssignments(verified.fullPlan),
@@ -1497,9 +1514,7 @@ export async function reconcileActivation({ github, context, env, root }) {
     JSON.stringify({ squad_artifact: 'activation-reconciled', schema_version: '1',
       origin_issue: verified.request.origin_issue, phases: verified.request.phases ?? [] }), '```',
   ].join('\n');
-  const result = (await github.rest.issues.createComment({
-    ...context.repo, issue_number: verified.request.origin_issue, body,
-  })).data;
+  const result = await publishActivation({ github, context, env, root, body });
   await upsertActivationLifecycle({ github, context, origin: verified.request.origin_issue,
     fullPlan: verified.fullPlan, phases: verified.request.phases ?? [], command: `/squad ${command.argumentText}` });
   return result;
