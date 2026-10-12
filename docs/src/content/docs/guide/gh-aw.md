@@ -1614,7 +1614,14 @@ GitHub CLI, and the repository's npm dependencies already installed. Install the
 exact compiler once with `gh extension install --pin v0.91.5 github/gh-aw`.
 If a different gh-aw version is installed, remove that extension with
 `gh extension remove gh-aw` before the pinned installation; v0.89.22 is unsupported
-for this fixture. With the pinned extension available, run:
+for this fixture. Before **either compiler path below**, build the current
+checkout's SDK so public `/casting` imports use freshly generated `dist` output:
+
+```bash
+npm run build -w packages/squad-sdk
+```
+
+With the pinned extension available, run:
 
 ```bash
 test "$(gh aw --version | awk 'END {print $NF}')" = "v0.91.5" &&
