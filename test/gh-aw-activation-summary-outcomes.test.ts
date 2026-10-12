@@ -138,6 +138,7 @@ function fixture(command: string = 'activate', secondOwner = 'Kint') {
   const create = (capture: any) => createActivation({
     github, context, env, root, capture, captureArtifactId: 800, createIssue,
     journalPath: join(root, 'journal.json'), sanitizeContent: (value: string) => value,
+    formatIssueBody: (value: string) => value,
   });
   const finalize = (capture: any, journal: any, receiptArtifactId = 801) =>
     finalizeActivation({ github, context, env, root, capture, journal, receiptArtifactId });

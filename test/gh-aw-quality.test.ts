@@ -445,6 +445,7 @@ function activationFixture() {
   const create = () => createActivation({
     github, context, env, root, capture, captureArtifactId: 800, journalPath, createIssue,
     sanitizeContent: (value: string) => value,
+    formatIssueBody: (value: string) => value,
   });
   return { root, capture, context, env, github, comments, createIssue, create, savedJournal };
 }

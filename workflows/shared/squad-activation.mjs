@@ -5,7 +5,7 @@ import {
   checkActivationPublication, extractIssueNumber, parseAgentRegistry, parsePendingReservation, parseRoster, parseStructuredData, selectActivationRecord,
   validateActivation, validateCastingPairFiles,
 } from './check-agent-binding.mjs';
-import { authorizeSquadCommand, classifySquadCommand } from './squad-command-contract.mjs';
+import { authorizeSquadCommand, classifySquadCommand, markdownContentLines } from './squad-command-contract.mjs';
 
 export const ACTIVATION_CAPTURE_SCHEMA = 'squad-activation-capture/v1';
 export const ACTIVATION_RECEIPT_SCHEMA = 'squad-activation-receipts/v1';
@@ -76,16 +76,13 @@ export function parseActivationPlan(body, kind, registryValue, teamMarkdown, sel
   requireThat(['plan', 'implementation'].includes(kind), 'unsupported plan artifact');
   const registry = parseAgentRegistry(registryValue);
   const roster = parseRoster(teamMarkdown);
-  const lines = body.replace(/\r\n?/g, '\n').split('\n');
+  const lines = markdownContentLines(body);
   const phased = lines.some(line => /^### Phase [1-9]\d*(?:\s|$)/.test(line));
   let phase = null;
-  let fence = false;
   const tasks = [];
   const ids = new Set();
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];
-    if (/^\s*```/.test(line)) { fence = !fence; continue; }
-    if (fence) continue;
     const heading = /^### Phase ([1-9]\d*)(?:\s|$)/.exec(line);
     if (heading) phase = Number(heading[1]);
     if (!line.trim().startsWith('|')) continue;
@@ -730,10 +727,12 @@ function bodyFor(operation, capture, journal) {
   };
 }
 
-function checkedIssueBody(body, operation, sanitizeContent) {
+function checkedIssueBody(body, operation, sanitizeContent, formatIssueBody, repo) {
   const sanitized = sanitizeContent(body);
-  requireThat(typeof sanitized === 'string' && [...sanitized].length <= MAX_ISSUE_BODY_CHARACTERS,
-    `operation ${operation.id}: rendered issue body exceeds GitHub's ${MAX_ISSUE_BODY_CHARACTERS}-character limit`);
+  requireThat(typeof sanitized === 'string', `operation ${operation.id}: sanitizer returned a non-string issue body`);
+  const attributed = formatIssueBody(sanitized, { repo });
+  requireThat(typeof attributed === 'string' && attributed.length <= MAX_ISSUE_BODY_CHARACTERS,
+    `operation ${operation.id}: rendered issue body exceeds the pinned runtime's ${MAX_ISSUE_BODY_CHARACTERS}-character limit including attribution`);
   return sanitized;
 }
 
@@ -766,12 +765,13 @@ async function verifyCurrentParent(github, context, issue, parent, operation, fa
 
 /** Only this trusted caller receives the runtime's synchronous createIssue result. */
 export async function createActivation({
-  github, context, env, root, capture, captureArtifactId, journalPath, createIssue, sanitizeContent,
+  github, context, env, root, capture, captureArtifactId, journalPath, createIssue, sanitizeContent, formatIssueBody,
 }) {
   requireThat(capture.schema === ACTIVATION_CAPTURE_SCHEMA &&
     capture.repository === `${context.repo.owner}/${context.repo.repo}` &&
     positive(captureArtifactId), 'trusted capture identity or durable capture artifact is missing');
   await revalidateCapture({ github, context, env, root, capture });
+  requireThat(typeof formatIssueBody === 'function', 'pinned runtime issue-body formatter is required before reservation');
   const titles = new Map(capture.operations.map(operation => {
     const title = sanitizeContent(operation.title);
     requireThat(typeof title === 'string' && title.trim().length > 0 && title.length <= 256,
@@ -782,12 +782,12 @@ export async function createActivation({
     return [operation.id, title];
   }));
   // Reserve only after rendering every body with the longest accepted numeric
-  // references. GitHub counts Unicode characters, not UTF-8 bytes.
+  // references and the pinned runtime's attribution and UTF-16 length bound.
   const preview = { receipts: capture.operations.map(operation => ({
     operation_id: operation.id, number: Number.MAX_SAFE_INTEGER,
   })) };
   for (const operation of capture.operations) {
-    checkedIssueBody(bodyFor(operation, capture, preview).body, operation, sanitizeContent);
+    checkedIssueBody(bodyFor(operation, capture, preview).body, operation, sanitizeContent, formatIssueBody, context.repo);
   }
   const comments = await github.paginate(github.rest.issues.listComments, {
     ...context.repo, issue_number: capture.origin_issue, per_page: 100,
@@ -851,7 +851,7 @@ export async function createActivation({
   save();
   for (const operation of capture.operations) {
     const content = bodyFor(operation, capture, journal);
-    const body = checkedIssueBody(content.body, operation, sanitizeContent);
+    const body = checkedIssueBody(content.body, operation, sanitizeContent, formatIssueBody, context.repo);
     journal.started.push(operation.id);
     save();
     // No retry on an ambiguous API failure: the durable reservation outlives this runner.
@@ -1277,17 +1277,16 @@ export async function verifyReconciliationRequest({
   requireThat(request.registry.revision === registry.revision && request.registry.sha256 === digest(registry),
     'current registry differs from the approved request');
   const team = readFileSync(`${root}/.squad/team.md`, 'utf8');
-  if (request.phases !== undefined) requireThat(Array.isArray(request.phases) && request.phases.length > 0 &&
-    request.phases.every((phase, index) => positive(phase) && (index === 0 || request.phases[index - 1] < phase)) &&
-    Array.isArray(oldEnvelope.phases), 'selected prior-phase coverage must be ascending unique phase IDs');
+  const phases = request.phases === undefined ? [] : request.phases;
+  requireThat(Array.isArray(phases) &&
+    phases.every((phase, index) => positive(phase) && (index === 0 || phases[index - 1] < phase)),
+  'selected prior-phase coverage must be ascending unique phase IDs');
+  requireThat(isDeepStrictEqual(phases, oldEnvelope.phases),
+    'selected prior-phase coverage must exactly match the original phase artifact');
   const fullPlan = parseActivationPlan(planComment.body, planEnvelope.squad_artifact, registry, team, []);
   const plan = structuredClone(fullPlan);
-  if (request.phases !== undefined) {
-    requireThat(Array.isArray(request.phases) && request.phases.length > 0 &&
-      request.phases.every(positive) && new Set(request.phases).size === request.phases.length &&
-      isDeepStrictEqual([...request.phases].sort((a, b) => a - b), [...oldEnvelope.phases].sort((a, b) => a - b)),
-    'selected prior-phase coverage must exactly match the original phase artifact');
-    plan.tasks = plan.tasks.filter(task => request.phases.includes(task.phase));
+  if (phases.length > 0) {
+    plan.tasks = plan.tasks.filter(task => phases.includes(task.phase));
     plan.epics = [...new Set(plan.tasks.map(task => task.epic))].filter(epic => epic !== 'origin');
     requireThat(plan.tasks.length > 0, 'selected prior phases contain no tasks');
     requireThat(plan.tasks.every(task => task.dependencies.every(id => plan.tasks.some(candidate => candidate.id === id))),

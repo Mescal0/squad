@@ -1107,6 +1107,24 @@ describe('compiled Squad command authorization boundary (#2185)', () => {
     })).rejects.toThrow('refused mutating mode');
   });
 
+  it.each([
+    '~~~markdown\n/squad activate\n~~~',
+    '````markdown\n```\n/squad activate\n```\n````',
+    '~~~~markdown\n~~~\n/squad activate\n~~~\n~~~~',
+    '   ~~~markdown\n/squad activate\n   ~~~~',
+    '    /squad activate',
+    '\t/squad activate',
+    '  \t/squad activate',
+  ])('preserves command exclusion for the shared Markdown code rules: %s', example => {
+    for (const newline of ['\n', '\r\n']) {
+      const payload = payloadFor('activate');
+      payload.comment!.body = example.replaceAll('\n', newline);
+      expect(classifySquadCommand(payload, 'issue_comment').status).toBe('none');
+      payload.comment!.body += `${newline}${newline}/squad plan`;
+      expect(classifySquadCommand(payload, 'issue_comment')).toMatchObject({ status: 'accepted', mode: 'plan' });
+    }
+  });
+
   it('detects a live-source mutation that removes authorization after strict compilation', async () => {
     const fixture = createFirstInstallFixture('a'.repeat(40), 'package');
     const mutationRoot = join(scratch, 'mutant');

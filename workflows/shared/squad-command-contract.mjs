@@ -106,6 +106,31 @@ function sourceFromPayload(payload, eventName) {
   return { source: 'none', text: '' };
 }
 
+/** Blank code regions without joining the surrounding Markdown blocks. */
+export function markdownContentLines(text) {
+  let fence = null;
+  return normalizeNewlines(text).split('\n').map(originalLine => {
+    if (fence) {
+      const closingFence = originalLine.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+      if (closingFence
+        && closingFence[1][0] === fence.delimiter
+        && closingFence[1].length >= fence.length) {
+        fence = null;
+      }
+      return '';
+    }
+    const openingFence = originalLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (openingFence) {
+      fence = {
+        delimiter: openingFence[1][0],
+        length: openingFence[1].length,
+      };
+      return '';
+    }
+    return /^(?: {4}| {0,3}\t)/.test(originalLine) ? '' : originalLine;
+  });
+}
+
 function extractInvocation(source, text) {
   if (source === 'workflow_dispatch') {
     if (!text) return null;
@@ -117,26 +142,7 @@ function extractInvocation(source, text) {
     };
   }
 
-  let fence = null;
-  for (const originalLine of normalizeNewlines(text).split('\n')) {
-    if (fence) {
-      const closingFence = originalLine.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
-      if (closingFence
-        && closingFence[1][0] === fence.delimiter
-        && closingFence[1].length >= fence.length) {
-        fence = null;
-      }
-      continue;
-    }
-    const openingFence = originalLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-    if (openingFence) {
-      fence = {
-        delimiter: openingFence[1][0],
-        length: openingFence[1].length,
-      };
-      continue;
-    }
-    if (/^(?: {4}| {0,3}\t)/.test(originalLine)) continue;
+  for (const originalLine of markdownContentLines(text)) {
     const line = originalLine.replace(/`+[^`]*`+/g, '').trim();
     if (!/^\/squad/i.test(line)) continue;
     const slash = line.match(/^\/squad(?:\s|$)/);

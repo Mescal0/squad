@@ -4,6 +4,7 @@ import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { compileFunction, constants } from 'node:vm';
+import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import { createFirstInstallFixture } from './helpers/gh-aw-install-fixture.js';
 import { diagnosticRuntime, fetchDiagnosticRuntime } from './helpers/gh-aw-diagnostic-runtime.js';
@@ -29,6 +30,7 @@ import {
 } from '../workflows/shared/check-agent-binding.mjs';
 import { enforceSquadCommandContract } from '../workflows/shared/squad-command-contract.mjs';
 import { selectActivationRecord as selectSdk } from '../packages/squad-sdk/src/casting/index.js';
+import { selectActivationRecord as selectBuiltSdk } from '../packages/squad-sdk/dist/casting/index.js';
 
 const repository = 'owner/repo';
 const timestamp = '2026-01-01T00:00:00Z';
@@ -220,7 +222,8 @@ function fixture({ count = 2, epic = false } = {}) {
   });
   const prepare = () => prepareActivation({ github, context, env, root, outputPath, capturePath });
   const create = (capture: any, captureArtifactId: any = 800) => createActivation({
-    github, context, env, root, capture, captureArtifactId, journalPath, createIssue, sanitizeContent: (value: string) => value,
+    github, context, env, root, capture, captureArtifactId, journalPath, createIssue,
+    sanitizeContent: (value: string) => value, formatIssueBody: (value: string) => value,
   });
   const finalize = (capture: any, journal: any, receiptArtifactId: any = 801) =>
     finalizeActivation({ github, context, env, root, capture, journal, receiptArtifactId });
@@ -326,6 +329,18 @@ describe('authenticated legacy activation promotion', () => {
 });
 
 describe('retry-safe activation preflight', () => {
+  it('requires the pinned formatter instead of falling back to an unattributed body bound', async () => {
+    const f = fixture();
+    const capture = await f.prepare();
+    await expect(createActivation({
+      github: f.github, context: f.context, env: f.env, root: f.root, capture,
+      captureArtifactId: 800, journalPath: f.journalPath, createIssue: f.createIssue,
+      sanitizeContent: (body: string) => body,
+    })).rejects.toThrow(/formatter is required before reservation/);
+    expect(f.writes).toEqual([]);
+    expect(f.createIssue).not.toHaveBeenCalled();
+  });
+
   it('rejects short-line expansion before any durable reservation or issue create', async () => {
     const f = fixture();
     f.comments.get(10)!.body += '\n'.repeat(33000);
@@ -343,6 +358,7 @@ describe('retry-safe activation preflight', () => {
     await expect(createActivation({
       github: f.github, context: f.context, env: f.env, root: f.root, capture,
       captureArtifactId: 800, journalPath: f.journalPath, createIssue: f.createIssue,
+      formatIssueBody: (body: string) => body,
       sanitizeContent: (body: string) => {
         seen.push(body);
         return body.includes('**Depends On:** #') ? body + 'x'.repeat(65536) : body;
@@ -354,13 +370,13 @@ describe('retry-safe activation preflight', () => {
     expect(f.createIssue).not.toHaveBeenCalled();
   });
 
-  it.each([65535, 65536, 65537])('bounds the exact rendered %i-character body including Unicode', async size => {
+  it.each([65535, 65536, 65537])('bounds the exact rendered %i-code-unit body including Unicode', async size => {
     const baseline = fixture({ count: 1 });
     await baseline.create(await baseline.prepare());
     const baselineBody = baseline.writes.find(write => write.method === 'createIssue')!.params.body;
-    const extra = size - [...baselineBody].length;
+    const extra = size - baselineBody.length;
     const f = fixture({ count: 1 });
-    f.comments.get(10)!.body += '\n'.repeat(Math.floor(extra / 3)) + '😀'.repeat(extra % 3);
+    f.comments.get(10)!.body += '\n'.repeat(Math.floor((extra - 2) / 3)) + '😀' + 'x'.repeat((extra - 2) % 3);
     expect(Buffer.byteLength(f.comments.get(10)!.body)).toBeLessThan(35000);
     const capture = await f.prepare();
     if (size > 65536) {
@@ -369,7 +385,7 @@ describe('retry-safe activation preflight', () => {
       expect(f.createIssue).not.toHaveBeenCalled();
     } else {
       const journal = await f.create(capture);
-      expect([...f.writes.find(write => write.method === 'createIssue')!.params.body]).toHaveLength(size);
+      expect(f.writes.find(write => write.method === 'createIssue')!.params.body).toHaveLength(size);
       await f.finalize(capture, journal);
       expect(f.createIssue).toHaveBeenCalledTimes(1);
     }
@@ -623,6 +639,7 @@ describe('trusted whole-plan activation finalization', () => {
     await expect(createActivation({
       github: f.github, context: f.context, capture, captureArtifactId: id,
       journalPath: f.journalPath, createIssue: f.createIssue, sanitizeContent: (text: string) => text,
+      formatIssueBody: (body: string) => body,
     })).rejects.toThrow(/durable capture artifact/);
     expect(f.writes).toEqual([]);
     expect(f.createIssue).not.toHaveBeenCalled();
@@ -703,6 +720,7 @@ describe('trusted lifecycle recovery and pre-write validation', () => {
       github: f.github, context: f.context, env: f.env, root: f.root, capture,
       captureArtifactId: 800, journalPath: f.journalPath, createIssue: f.createIssue,
       sanitizeContent: () => title,
+      formatIssueBody: (body: string) => body,
     })).rejects.toThrow(/sanitized title/);
     expect(f.writes).toEqual([]);
     expect(f.createIssue).not.toHaveBeenCalled();
@@ -1090,6 +1108,7 @@ describe('trusted synchronous publication completion (source and strict-compiled
         } }, (name: string) => {
           if (name === join(f.root, 'gh-aw/actions/index.cjs')) return api;
           if (name === join(f.root, 'gh-aw/actions/sanitize_content.cjs')) return runtime.load('js/sanitize_content.cjs');
+          if (name === join(f.root, 'gh-aw/actions/issue_body.cjs')) return runtime.load('js/issue_body.cjs');
           return createRequire(import.meta.url)(name);
         }, {}, {}, () => github,
       );
@@ -1113,10 +1132,160 @@ describe('trusted synchronous publication completion (source and strict-compiled
     };
   }
 
+  it.each([
+    [65535, false], [65536, false], [65537, false],
+    [65535, true], [65536, true], [65537, true],
+  ] as const)(
+    'compiled: admits only the pinned runtime attributed-body bound of %i code units (supplementary Unicode=%s) before reservation', async (size, unicode) => {
+      const baseline = fixture({ count: 1 });
+      const baselineRun = compiled(baseline);
+      await baselineRun.create(await baselineRun.prepare());
+      const attributedBody = baseline.writes.find(write => write.method === 'createIssue')!.params.body;
+      const f = fixture({ count: 1 });
+      const extra = size - attributedBody.length;
+      const newlines = Math.floor((extra - (unicode ? 3 : 1)) / 3);
+      f.comments.get(10)!.body += '\n'.repeat(newlines) + (unicode ? '😀' : '')
+        + 'x'.repeat(extra - newlines * 3 - (unicode ? 2 : 0));
+      const run = compiled(f);
+      const capture = await run.prepare();
+      if (size > 65536) {
+        await expect(run.create(capture)).rejects.toThrow(/body exceeds/);
+        expect(f.writes).toEqual([]);
+        expect(f.createIssue).not.toHaveBeenCalled();
+      } else {
+        await run.finalize(capture, await run.create(capture));
+        expect(f.writes.find(write => write.method === 'createIssue')!.params.body.length).toBe(size);
+        if (unicode) expect(f.writes.find(write => write.method === 'createIssue')!.params.body).toContain('😀');
+        expect(f.createIssue).toHaveBeenCalledTimes(1);
+      }
+    },
+  );
+
   for (const implementation of ['source', 'compiled']) {
     const driver = (f: ReturnType<typeof fixture>) => implementation === 'compiled' ? compiled(f) : {
       ...f, reconcile: () => reconcileActivation({ github: f.github, context: f.context, env: f.env, root: f.root }),
     };
+
+    it.each(['tilde', 'long-backtick', 'long-tilde', 'indented-fence', 'spaces', 'tab', 'space-tab'])(
+      `${implementation}: excludes twice-sanitized %s code examples from the actual activation task set`, async style => {
+        const f = fixture({ count: 1 });
+        const example = [
+          '### Phase 99',
+          '| # | Title | Owner | Agent ID | Depends On |',
+          '|---|---|---|---|---|',
+          '| example | Must never create | Builder | builder | — |',
+        ];
+        const fenced = style === 'tilde' ? ['~~~markdown', ...example, '~~~']
+          : style === 'long-backtick' ? ['````markdown', '```', ...example, '```', '````']
+          : style === 'long-tilde' ? ['~~~~markdown', '~~~', ...example, '~~~', '~~~~']
+          : style === 'indented-fence' ? ['   ~~~markdown', ...example, '   ~~~~']
+          : example.map(line => `${style === 'spaces' ? '    ' : style === 'space-tab' ? '  \t' : '\t'}${line}`);
+        const sanitizer = diagnosticRuntime(runtimeSources, f.root, [], {
+          GITHUB_REPOSITORY: repository,
+        }).load('js/sanitize_content.cjs').sanitizeContent;
+        const body = `# Frozen plan\n\n${fenced.join('\n')}\n\n${f.comments.get(10)!.body}`;
+        f.comments.get(10)!.body = sanitizer(sanitizer(body));
+        expect(f.comments.get(10)!.body).toContain('Must never create');
+        const run = driver(f);
+        const capture = await run.prepare();
+        expect(capture.fullPlan.phased).toBe(false);
+        expect(capture.fullPlan.tasks.map((task: any) => task.id)).toEqual(['1']);
+        await run.finalize(capture, await run.create(capture));
+        expect(f.createIssue).toHaveBeenCalledTimes(1);
+        expect(f.createIssue.mock.calls[0][0].title).not.toContain('Must never create');
+      },
+    );
+
+    it.each([
+      [[], 'omitted', true], [[], 'empty', true], [[1], 'omitted', false],
+      [[1], 'empty', false], [[1], 'matched', true], [[1], 'mismatched', false],
+      [[], 'mismatched', false],
+    ])(`${implementation}: binds source scope %j to %s request scope`, async (sourcePhases, scope, valid) => {
+      const f = recovery();
+      // A phase-scoped source over the same mapped issues proves omission cannot widen recovery.
+      f.original.body = f.original.body.replace('"phases":[]', `"phases":${JSON.stringify(sourcePhases)}`);
+      if (sourcePhases.length) f.comments.get(10)!.body = `### Phase 1\n${f.comments.get(10)!.body}`;
+      f.request.original.sha256 = digest(f.original.body);
+      f.request.plan.sha256 = digest(f.comments.get(10)!.body);
+      if (scope !== 'omitted') Object.assign(f.request, {
+        phases: scope === 'empty' ? [] : scope === 'matched' ? sourcePhases : [2],
+      });
+      if (sourcePhases.length) {
+        f.issues.set(201, f.issue(201, { labels: ['squad', 'squad:builder'] }));
+        f.parents.set(201, 42);
+        for (const number of [101, 102]) {
+          f.parents.set(number, 201);
+          f.issues.get(number)!.body = f.issues.get(number)!.body.replace('**Parent:** #42', '**Parent:** #201');
+        }
+        f.request.epics.push({ epic: 'phase-1', issue: 201 });
+      }
+      f.approve();
+      const run = driver(f);
+      if (valid) {
+        await run.reconcile();
+        expect(f.accepted()).toHaveLength(2);
+        expect(parseStructuredData(f.accepted().at(-1)!.body).phases).toEqual(sourcePhases);
+      } else {
+        await expect(run.reconcile()).rejects.toThrow(/phase/);
+        expect(f.writes).toEqual([]);
+      }
+      expect(f.createIssue).not.toHaveBeenCalled();
+    });
+
+    it(`${implementation}: omission cannot bind an unactivated later phase through full-plan mappings`, async () => {
+      const f = recovery({ epic: true });
+      f.original.body = f.original.body.replace('"phases":[]', '"phases":[1]');
+      f.comments.get(10)!.body = [
+        ...[1, 2].flatMap(phase => [
+          `### Phase ${phase}`,
+          '| # | Title | Agent | Agent ID | Depends On | Epic |',
+          '|---|---|---|---|---|---|',
+          `| ${phase} | Task ${phase} | Builder | builder | ${phase === 1 ? '—' : '1'} | example |`,
+        ]),
+        block('Structured data', envelope('implementation')),
+      ].join('\n');
+      f.request.original.sha256 = digest(f.original.body);
+      f.request.plan.sha256 = digest(f.comments.get(10)!.body);
+      f.approve();
+      await expect(driver(f).reconcile()).rejects.toThrow(/phase.*exactly match/);
+      expect(f.writes).toEqual([]);
+      expect(f.createIssue).not.toHaveBeenCalled();
+    });
+
+    it(`${implementation}: production readers ignore discussion but reject extra history candidates`, async () => {
+      const f = phasedFixture();
+      const run = driver(f);
+      const records: any[] = [f.comment(9000, 'Thanks, this breakdown looks good.', operator)];
+      const proofs: any[] = [];
+      let head: any;
+      let capture: any;
+      for (const phase of [1, 2]) {
+        f.activate(phase);
+        capture = await run.prepare();
+        await run.finalize(capture, await run.create(capture));
+        const source = f.latest();
+        const bridge = await f.bridge(source);
+        head = bridge.result;
+        records.push(source, head);
+        proofs.push(selectionEvidence(await verifyReconciliationRequest({
+          github: f.github, context: f.context, root: f.root,
+          requestCommentId: bridge.comment.id, requestSha256: digest(bridge.comment.body),
+        })));
+      }
+      const checker = 'trusted' in run
+        ? (await import(pathToFileURL(join(run.trusted, '.github/workflows/shared/check-agent-binding.mjs')).href)).selectActivationRecord
+        : selectChecker;
+      const selectionContext = { repository, originIssue: 42, reconciliations: proofs,
+        epicAssignments: frozenAssignments(capture.fullPlan) };
+      const pending = [...f.comments.values()].find(comment => comment.body.includes('squad-activation-pending/v1'))!;
+      expect(pending).toBeDefined();
+      for (const select of [selectSdk, selectBuiltSdk, checker]) {
+        expect(select(records, f.registry, selectionContext)?.id).toBe(head.id);
+        for (const extra of [pending, records[1], head]) {
+          expect(() => select([...records, { ...extra, id: 9001 }], f.registry, selectionContext)).toThrow();
+        }
+      }
+    });
 
     it(`${implementation}: completes the actual publication and retries without claiming a new output`, async () => {
       const f = fixture();

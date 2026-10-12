@@ -225,6 +225,7 @@ function activationFixture(body = taskTable(), command = 'activate', kind = 'pla
   const create = (capture: any) => createActivation({
     github, context, env, root, capture, createIssue, captureArtifactId: 800,
     journalPath: join(root, 'receipts.json'), sanitizeContent: (text: string) => text,
+    formatIssueBody: (value: string) => value,
   });
   const finalize = (capture: any, journal: any) => finalizeActivation({
     github, context, env, root, capture, journal, receiptArtifactId: 801,

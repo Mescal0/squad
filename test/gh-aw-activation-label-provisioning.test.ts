@@ -152,6 +152,7 @@ function fixture({ owners = ['Builder', 'Reviewer', '@copilot'], implementation 
   const create = (capture: any) => createActivation({
     github, context, env, root, capture, captureArtifactId: 800, journalPath, createIssue,
     sanitizeContent: (value: string) => value,
+    formatIssueBody: (value: string) => value,
   });
   const finalize = (capture: any, journal: any) => finalizeActivation({
     github, context, env, root, capture, journal, receiptArtifactId: 801,

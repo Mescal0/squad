@@ -763,6 +763,39 @@ export function parsePendingReservation(body, repository, originIssue) {
   return value;
 }
 
+function classifyActivationHistory(record, context) {
+  const blocks = [...record.body.matchAll(/Structured data:\s*```json\s*([\s\S]*?)```/g)];
+  if (blocks.length === 0 && record.body.includes('squad-activation-pending/v1')) {
+    const pending = parsePendingReservation(record.body, context.repository, context.originIssue);
+    return { ...record, pending, artifact: { squad_artifact: 'activation-pending',
+      schema_version: '1', origin_issue: pending.origin_issue, phases: pending.phases } };
+  }
+  const reconciliationMarker = /Activation reconciliation:|activation-reconciled/.test(record.body);
+  const activationMarker = reconciliationMarker || /Activation bindings:/.test(record.body);
+  if (!/Structured data:/.test(record.body) && !activationMarker) return undefined;
+  let artifact;
+  try {
+    if (blocks.length !== 1) throw new Error('exactly one structured envelope is required');
+    artifact = JSON.parse(blocks[0][1]);
+  } catch (error) {
+    if (activationMarker || /activated|plan-accepted|phases-accepted/.test(record.body)) throw error;
+    return undefined;
+  }
+  const knownArtifact = ACTIVATION_ARTIFACTS.has(artifact?.squad_artifact);
+  if (!knownArtifact && !activationMarker) return undefined;
+  if (!reconciliationMarker && knownArtifact && artifact.squad_artifact !== 'activation-reconciled' &&
+    Number.isSafeInteger(artifact.origin_issue) && artifact.origin_issue > 0 &&
+    artifact.origin_issue !== context.originIssue) return undefined;
+  if (!knownArtifact) throw new Error('Activation selection refused: unknown activation artifact');
+  if (artifact.origin_issue !== context.originIssue || artifact.schema_version !== '1') {
+    throw new Error('Activation selection refused: artifact origin/schema mismatch');
+  }
+  if (reconciliationMarker && artifact.squad_artifact !== 'activation-reconciled') {
+    throw new Error('Activation selection refused: reconciliation requires activation-reconciled artifact');
+  }
+  return { ...record, artifact };
+}
+
 /** Evidence must come from the trusted API verifier, never from the artifact being selected. */
 function selectActivationPair(records, registryValue, context) {
   const fail = message => { throw new Error(`Activation selection refused: ${message}`); };
@@ -773,18 +806,8 @@ function selectActivationPair(records, registryValue, context) {
       fail('duplicate or malformed comment identity');
     }
     ids.add(record.id);
-    const blocks = [...record.body.matchAll(/Structured data:\s*```json\s*([\s\S]*?)```/g)];
-    if (blocks.length === 0 && record.body.includes('squad-activation-pending/v1')) {
-      const pending = parsePendingReservation(record.body, context.repository, context.originIssue);
-      return { ...record, pending, artifact: { squad_artifact: 'activation-pending',
-        schema_version: '1', origin_issue: pending.origin_issue, phases: pending.phases } };
-    }
-    if (blocks.length !== 1) fail('exactly one structured envelope is required');
-    const artifact = JSON.parse(blocks[0][1]);
-    if (!ACTIVATION_ARTIFACTS.has(artifact.squad_artifact)) fail('unknown activation artifact');
-    if (artifact.origin_issue !== context.originIssue || artifact.schema_version !== '1') fail('artifact origin/schema mismatch');
-    return { ...record, artifact };
-  });
+    return classifyActivationHistory(record, context);
+  }).filter(Boolean);
   const reconciled = parsed.filter(record => record.artifact.squad_artifact === 'activation-reconciled');
   if (reconciled.length > 1) fail('competing reconciliations');
   let selected;
@@ -825,6 +848,7 @@ function selectActivationPair(records, registryValue, context) {
     const bindings = [...selected.body.matchAll(/Activation bindings:\s*```json\s*([\s\S]*?)```/g)];
     if (bindings.length !== 1 || hash(JSON.parse(bindings[0][1])) !== value.bindings_sha256) fail('binding digest mismatch');
   } else {
+    if ((context.reconciliations ?? []).length > 0) fail('verifier evidence has no matching reconciliation');
     if (parsed.length > 1) fail('ambiguous original activation records');
     selected = parsed[0];
     if (selected?.pending) fail('pending reservation alone is not activation authority');
@@ -914,7 +938,8 @@ export function selectActivationRecord(records, registryValue, context) {
     usedRequests.add(proof.requestCommentId);
     validated.set(record.id, { selected, source, proof, prior: carrier?.prior });
   }
-  if (usedRecords.size !== records.length || usedProofs.size !== context.reconciliations.length) {
+  if (records.some(record => !usedRecords.has(record.id) && classifyActivationHistory(record, context) !== undefined) ||
+    usedProofs.size !== context.reconciliations.length) {
     fail('unconsumed history records or verifier proofs');
   }
   const parents = new Map();

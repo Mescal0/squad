@@ -848,8 +848,8 @@ Use this checklist for the initial bootstrap and after any workflow update:
 | Research backlog | Follow the proposal issue through research, triage, plan, and activate | The journey ends with assignable implementation issues; `/squad implement` is used only on those generated tasks |
 | Cast checks | Open the linked Cast PR and inspect its checks; if application CI is `action_required`, approve that workflow run and wait for it to finish | Copilot review and the repository's normal build, test, lint, and security checks complete before merge |
 | Handoffs | Run `/squad implement` on a ready issue, then review its PR | The dispatcher starts the appropriate isolated worker; automatic PR review supplies the independent current-head verdict; `/squad review` explains how to rerun that exact automatic check |
-| Rerun | Repeat the same command after a cancellation or uncertain result | Existing Cast and implementation PRs are detected instead of duplicated; an unchanged reviewed head is not reviewed twice |
-| Recovery | Fix the named failing activation step, then use **Re-run failed jobs**; for an interrupted command, rerun the identical `/squad` command | Activation uploads no partial state artifact, and command-specific idempotency resumes from GitHub's committed PR, issue, comment, and review state |
+| Rerun | Repeat Cast, implementation, or review commands after checking their existing durable outputs; do not rerun an ambiguous activation to fill missing issues | Existing Cast and implementation PRs are detected instead of duplicated; an unchanged reviewed head is not reviewed twice |
+| Recovery | Inspect activation receipts, the durable pending comment, and current issue state; use [explicit current-state reconciliation](#deterministic-activation-and-no-create-recovery) for interrupted or ambiguous creation | Recovery validates explicitly mapped existing issues without creating replacements or matching titles; a pending reservation blocks another create batch |
 
 If a work command auto-opens a Cast PR because no committed team exists, merge
 that PR and rerun the original command. Do not start a second Cast command.
@@ -1506,7 +1506,9 @@ forged reservation fails closed, as does incomplete current API evidence.
 
 For safe phase continuation, include ascending `"phases": [1, 2]` in a request
 covering **all previously activated phases** and their complete mappings. This
-must match the exact source artifact's phase coverage. After reconciliation,
+must match the exact source artifact's phase coverage. Omitting `phases` is
+equivalent to `"phases": []`, and is valid only for a whole-plan source with
+empty phase coverage; neither form widens a phase-scoped source. After reconciliation,
 `/squad activate phase 3` creates only Phase 3 work, reusing validated prior
 issues and shared epics. Missing, stale or competing mappings fail closed for
 that invocation. Shared-epic labels use the full frozen plan's owner set, not
@@ -1853,6 +1855,9 @@ A single activation invocation must fit its frozen planning-policy limit:
 default 20, lean 10, enterprise 50, or spike 5, subject to explicit supported
 overrides and a hard ceiling of 50. New epics count; validated reused epics do
 not. Oversized batches fail before creation, rather than silently truncating.
+Before reserving a batch, the writer also checks every sanitized issue body with
+the pinned runtime's attribution formatter and its 65,536 UTF-16-code-unit bound,
+including supplementary Unicode and worst-case numeric reference widths.
 
 If any create outcome is ambiguous, a label check fails, or a receipt is missing,
 the job fails and acceptance is withheld. The durable pending comment blocks
@@ -2567,14 +2572,14 @@ other refs.
 | `/squad` command is ignored | Lock file not committed or workflow not compiled | Run `gh aw compile --strict`, commit the lock file, and push |
 | Universe is full on cast-member | All character names in the universe are allocated | Retire an unused member first, or re-cast with `/squad cast` |
 | "No plan found" on plan accept | No `/squad plan` comment exists yet | Run `/squad plan` first to generate a plan for review |
-| Plan activation creates fewer issues than the accepted plan declares | The run ended early, or it reached the `create-issue` (75) or `add-labels` (110) safe-output cap | Inspect the Actions logs and originating issue's activation summary for the shortfall and any cap reached. Re-run the identical activation command (title matching resumes without duplicating existing issues), or activate one phase at a time with `/squad plan activate phase {N}` |
-| Activation run is green but some issues are missing or unlabeled | The agent may have omitted `report_incomplete`, which would fail the conclusion step if emitted | A green run is not proof of a complete activation. Check the activation summary and Actions logs, then verify with `gh issue list --label squad`; automatic tracking-issue reporting is disabled |
+| Plan activation creates fewer issues than the frozen plan declares | Creation was interrupted or an actual create result could not be verified; oversized batches fail before creation under the planning-policy limit (default 20, lean 10, enterprise 50, spike 5; hard ceiling 50, counting new epics) | Inspect Actions logs, receipts, the pending reservation, and current issues. Use [explicit current-state reconciliation](#deterministic-activation-and-no-create-recovery) with exact existing issue mappings and source phase coverage; never resume by title or rerun to create missing issues. Plan smaller phases before starting a fresh activation, not as a bypass for a pending batch |
+| Activation run is green but some issues are missing or unlabeled | Workflow status alone is not consumer authority; current state may differ from the validated publication | Inspect the trusted publication receipt/readback, validated bindings, current labels, and hierarchy. Missing receipts or failed validation withhold acceptance; reconcile ambiguous history explicitly without creating issues. Do not rely on agent-emitted `report_incomplete` or a title/label search as proof |
 | A Squad label has no description and an unexpected color | It was auto-created on a fresh repo by `create-if-missing` | Expected, not a failure. Edit the label if you want a description or a specific color |
 | `/squad implement` cannot create a PR | Expected under Profile A (recommended); Actions is not allowed to create pull requests and there is no automatic fallback for this workflow | Push the worker's branch and open the PR manually, or switch to [Profile B](#profile-b-opt-in-automatic-pr-creation) if you accept its repository-wide self-approval tradeoff |
 | Epic implementation dispatches no workers | Every child is blocked or already has an open implementation PR | Merge dependency PRs, then run `/squad implement` on the epic again |
 | Standalone activation fails before init | Latest stable release lookup, bundle download, or mandatory checksum verification failed | Inspect installer diagnostics and restore complete, valid release assets, then use **Re-run failed jobs** |
 | Squad health fails | Initialization or committed team state is incomplete | Inspect the `Run Squad health check` JSON, correct the reported state, and rerun; no `squad-state` artifact is uploaded on failure |
-| A command run was cancelled or its result is uncertain | The run stopped before a durable output was confirmed | Rerun the identical `/squad` command; Cast, implementation, activation, and review paths check existing GitHub state before creating output |
+| A command run was cancelled or its result is uncertain | The run stopped before a durable output was confirmed | Check existing durable outputs before repeating Cast, implementation, or review commands. For activation, inspect the pending reservation and receipts and use explicit no-create current-state reconciliation; do not retry an interrupted batch to fill missing issues |
 
 ---
 

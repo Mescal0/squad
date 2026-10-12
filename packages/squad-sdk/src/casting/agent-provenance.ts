@@ -684,6 +684,42 @@ function readPendingSourceBody(body: string): unknown {
   }
 }
 
+function classifyActivationHistory(
+  record: ActivationRecord,
+  originIssue: number,
+): WorkAgentBinding['artifact'] | 'activation-pending' | undefined {
+  // Pending reservations belong to history but are never acceptance candidates.
+  try {
+    const pending = readPendingSourceBody(record.body);
+    if (isRecord(pending) && pending.schema === 'squad-activation-pending/v1') return 'activation-pending';
+  } catch (error) {
+    if (record.body.includes('squad-activation-pending/v1')) throw error;
+  }
+  const reconciliationMarker = /Activation reconciliation:|activation-reconciled/.test(record.body);
+  const activationMarker = reconciliationMarker || /Activation bindings:/.test(record.body);
+  if (!/Structured data:/.test(record.body) && !activationMarker) return undefined;
+  let envelope: unknown;
+  try {
+    envelope = readActivationSection(record.body, 'Structured data');
+  } catch (error) {
+    if (activationMarker || /activated|plan-accepted|phases-accepted/.test(record.body)) throw error;
+    return undefined;
+  }
+  const knownArtifact = isRecord(envelope)
+    && ACTIVATION_ARTIFACTS.includes(envelope.squad_artifact as WorkAgentBinding['artifact']);
+  if (!knownArtifact && !activationMarker) return undefined;
+  if (!reconciliationMarker && isRecord(envelope) && knownArtifact
+    && envelope.squad_artifact !== 'activation-reconciled'
+    && isPositiveSafeInteger(envelope.origin_issue) && envelope.origin_issue !== originIssue) {
+    return undefined;
+  }
+  const artifact = activationEnvelope(envelope, originIssue);
+  if (reconciliationMarker && artifact !== 'activation-reconciled') {
+    throw new AgentProvenanceError('Reconciliation requires activation-reconciled artifact');
+  }
+  return artifact;
+}
+
 /**
  * Select a unique activation using independently verified current-state evidence.
  * Digests use SHA-256 over UTF-8: source bodies are hashed verbatim, registry is
@@ -734,35 +770,8 @@ function selectActivationPair(
       throw new AgentProvenanceError('Invalid or duplicate activation record id');
     }
     byId.set(record.id, record);
-    // A pending reservation is never an acceptance, including any prior claims.
-    try {
-      const pending = readPendingSourceBody(record.body);
-      if (isRecord(pending) && pending.schema === 'squad-activation-pending/v1') continue;
-    } catch {
-      // Non-pending comments still undergo the normal activation classification.
-    }
-    const reconciliationMarker = /Activation reconciliation:|activation-reconciled/.test(record.body);
-    const activationMarker = reconciliationMarker || /Activation bindings:/.test(record.body);
-    if (!/Structured data:/.test(record.body) && !activationMarker) continue;
-    let envelope: unknown;
-    try {
-      envelope = readActivationSection(record.body, 'Structured data');
-    } catch (error) {
-      if (activationMarker || /activated|plan-accepted|phases-accepted/.test(record.body)) throw error;
-      continue;
-    }
-    const knownArtifact = isRecord(envelope)
-      && ACTIVATION_ARTIFACTS.includes(envelope.squad_artifact as WorkAgentBinding['artifact']);
-    if (!knownArtifact && !activationMarker) continue;
-    if (!reconciliationMarker && isRecord(envelope) && knownArtifact
-      && envelope.squad_artifact !== 'activation-reconciled'
-      && isPositiveSafeInteger(envelope.origin_issue) && envelope.origin_issue !== context.originIssue) {
-      continue;
-    }
-    const artifact = activationEnvelope(envelope, context.originIssue);
-    if (reconciliationMarker && artifact !== 'activation-reconciled') {
-      throw new AgentProvenanceError('Reconciliation requires activation-reconciled artifact');
-    }
+    const artifact = classifyActivationHistory(record, context.originIssue);
+    if (artifact === undefined || artifact === 'activation-pending') continue;
     candidates.push({ record, artifact });
   }
   const reconciled = candidates.filter(({ artifact }) => artifact === 'activation-reconciled');
@@ -940,7 +949,9 @@ export function selectActivationRecord(
     usedRequests.add(proof.requestCommentId);
     validated.set(record.id, { selected: selected!, source, proof, prior: carrier?.prior });
   }
-  if (usedRecords.size !== records.length || usedProofs.size !== context.reconciliations.length) {
+  if (records.some(record => !usedRecords.has(record.id)
+    && classifyActivationHistory(record, context.originIssue) !== undefined)
+    || usedProofs.size !== context.reconciliations.length) {
     fail('unconsumed history records or verifier proofs');
   }
   const parents = new Map<number, number>();

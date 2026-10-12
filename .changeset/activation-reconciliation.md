@@ -23,3 +23,5 @@ reservations and their prior references never authorize activation on their own.
 Select complete transitive phase histories only when every reconciliation has an
 independent verifier proof and exact source links form one fully consumed chain
 with consistent frozen snapshots, expanding phases, and preserved prior mappings.
+Ignore unrelated discussion in scoped pairs and complete histories while retaining
+rejection of extra activation or pending candidates and ambiguous chains.

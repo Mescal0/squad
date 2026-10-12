@@ -8,6 +8,7 @@ import {
   frozenAssignments,
 } from '../workflows/shared/squad-activation.mjs';
 import { selectActivationRecord as selectChecker } from '../workflows/shared/check-agent-binding.mjs';
+import { selectActivationRecord as selectBuiltSdk } from '../packages/squad-sdk/dist/casting/index.js';
 import {
   AgentProvenanceError,
   parseAgentProvenanceRegistry,
@@ -849,7 +850,7 @@ ${section('Activation evidence', {
       }
 
       function rejectChain(records: ActivationRecord[], proofs: ReconciliationEvidence[]) {
-        for (const selector of [selectActivationRecord, selectChecker]) {
+        for (const selector of [selectActivationRecord, selectBuiltSdk, selectChecker]) {
           expect(() => selector(records, registry(), context(proofs))).toThrow();
         }
       }
@@ -898,6 +899,43 @@ ${section('Activation evidence', {
         rejectChain(records.filter(record => record.id !== first.record.id), [first.evidence, second.evidence]);
         rejectChain([...records, first.source], [first.evidence, second.evidence]);
         rejectChain([...records, { id: 999, body: body() }], [first.evidence, second.evidence]);
+      });
+
+      it.each([
+        ['source SDK', selectActivationRecord], ['built SDK', selectBuiltSdk], ['checker', selectChecker],
+      ] as const)(
+        '%s ignores ordinary discussion in verified chains and scoped pairs',
+        (_reader, selector) => {
+          for (const sourceKind of ['pending', 'activation'] as const) {
+            const first = chainNode(1, [1], undefined, { sourceKind });
+            const second = chainNode(2, [1, 2], first, { sourceKind });
+            const discussion = { id: 999, body: 'Thanks, the task breakdown looks good.' };
+            expect(selector([discussion], registry(), context())).toBeUndefined();
+            expect(() => selector([discussion], registry(), context([second.evidence]))).toThrow();
+            for (const nodes of [[second], [first, second]]) {
+              expect(selector(
+                [discussion, { id: 998, body: section('Structured data', {
+                  squad_artifact: 'plan', schema_version: '1', origin_issue: 45, phases: [],
+                }) }, ...nodes.flatMap(node => [node.source, node.record])],
+                registry(), context(nodes.map(node => node.evidence)),
+              )?.id).toBe(second.record.id);
+            }
+          }
+        },
+      );
+
+      it('rejects extra pending, activation, and malformed candidates in a mixed chain', () => {
+        const first = chainNode(1, [1]);
+        const second = chainNode(2, [1, 2], first);
+        const records = [first.source, first.record, second.source, second.record,
+          { id: 998, body: 'Ordinary discussion.' }];
+        for (const extra of [
+          chainNode(3, [1, 2, 3], second).source,
+          { id: 999, body: body() },
+          { id: 999, body: 'Activation bindings:\n```json\n{broken\n```' },
+          { id: 999, body: first.source.body.replace('"phases":[1]', '"phases":null') },
+          { id: 999, body: second.record.body },
+        ]) rejectChain([...records, extra], [first.evidence, second.evidence]);
       });
 
       it('rejects altered ancestor bodies, malformed links, unknown parents, and self-links', () => {
