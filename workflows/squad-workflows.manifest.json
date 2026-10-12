@@ -136,7 +136,7 @@
       "package_destination": ".github/aw/squad/runtime/shared/squad-agent-binding-check.yml",
       "destination": ".github/workflows/squad-agent-binding-check.yml",
       "ownership": "manifest",
-      "sha256": "29445e87b5ee6a185d52b3890ba662acffa2ba2747d3359ed928514f5dd2e925"
+      "sha256": "e3098d9e9c4f5c711f37718083fb285b4778ecc987fee0c864429b8d868336b3"
     },
     {
       "path": "shared/squad-activation.mjs",
@@ -152,7 +152,7 @@
       "package_destination": ".github/workflows/shared/check-agent-binding.mjs",
       "destination": ".github/workflows/shared/check-agent-binding.mjs",
       "ownership": "manifest",
-      "sha256": "ea5e11079e0dfc12374932225cec752108d6119e50340a4e210f9c22bfff4f6b"
+      "sha256": "261d766684ad213a41848e8c62e026b01492bf624d0e141c1ae7a36308c83b56"
     },
     {
       "path": "shared/squad-review-guard.mjs",

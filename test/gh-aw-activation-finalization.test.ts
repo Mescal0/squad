@@ -24,6 +24,7 @@ import {
 } from '../workflows/shared/squad-activation.mjs';
 import {
   parseStructuredData,
+  collectHistoricalActivationRecords,
   selectActivationRecord as selectChecker,
   validateCastingPairFiles,
   main as checkBindings,
@@ -1599,9 +1600,13 @@ describe('explicit pending-source current-state reconciliation', () => {
   });
 });
 
-async function runCollectedChecker(f: ReturnType<typeof fixture>, comments: Array<{ id: number; body: string }>) {
+async function runCollectedChecker(
+  f: ReturnType<typeof fixture>, comments: Array<{ id: number; body: string }>,
+  options: { audit?: Record<string, any>; onFetch?: (path: string) => void; checker?: typeof checkBindings } = {},
+) {
   const input = join(f.root, 'comments.json');
-  writeFileSync(input, JSON.stringify(comments.map(({ id, body }) => ({ id, body, issue: 42 }))));
+  const records = comments.map(({ id, body }) => ({ id, body, issue: 42 }));
+  writeFileSync(input, JSON.stringify(options.audit ? { ...options.audit, comments: records } : records));
   const argv = process.argv;
   const token = process.env.GITHUB_TOKEN;
   const log = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -1609,8 +1614,14 @@ async function runCollectedChecker(f: ReturnType<typeof fixture>, comments: Arra
     const url = new URL(input);
     expect(url.origin).toBe('https://api.github.com');
     const path = url.pathname.replace('/repos/owner/repo/', '');
+    options.onFetch?.(path);
     let data;
-    if (path === 'issues/42/comments') data = [...f.comments.values()];
+    const headers: Record<string, string> = {};
+    if (path === 'issues/42/comments') {
+      const page = Number(url.searchParams.get('page') ?? 1);
+      data = [...f.comments.values()].slice((page - 1) * 100, page * 100);
+      if (f.comments.size > page * 100) headers.link = `<https://api.github.com/repos/owner/repo/issues/42/comments?page=${page + 1}>; rel="next"`;
+    }
     else if (/^issues\/comments\/\d+$/.test(path)) data = f.comments.get(Number(path.split('/').at(-1)));
     else if (/^issues\/\d+\/parent$/.test(path)) {
       const parent = f.parents.get(Number(path.split('/')[1]));
@@ -1620,12 +1631,12 @@ async function runCollectedChecker(f: ReturnType<typeof fixture>, comments: Arra
     else if (/^issues\/\d+$/.test(path)) data = f.issues.get(Number(path.split('/')[1]));
     else if (path === 'collaborators/operator/permission') data = { permission: f.permissions.get(operator.login) };
     else throw new Error(`Unexpected checker request ${path}`);
-    return new Response(JSON.stringify(data), { status: 200 });
+    return new Response(JSON.stringify(data), { status: 200, headers });
   }));
   try {
     process.argv = ['node', 'checker', `--comments-file=${input}`, `--team-file=${f.root}/.squad/team.md`, '--repo=owner/repo'];
     process.env.GITHUB_TOKEN = 'synthetic-test-token';
-    await checkBindings();
+    await (options.checker ?? checkBindings)();
     return log.mock.calls.map(args => args[0]);
   } finally {
     process.argv = argv;
@@ -1637,8 +1648,194 @@ async function runCollectedChecker(f: ReturnType<typeof fixture>, comments: Arra
 }
 
 describe('live downstream verification', () => {
-  it.each(['.github/workflows/squad-agent-binding-check.yml', 'workflows/shared/squad-agent-binding-check.yml'])(
-    '%s executes a historical audit, retaining old explicit predecessors without run attestation', async path => {
+  const automaticContext = () => ({
+    eventName: 'workflow_run', repo: { owner: 'owner', repo: 'repo' },
+    payload: { workflow_run: { updated_at: '2026-10-12T16:00:00Z' } },
+  });
+  const automaticAudit = (requestsUsed = 0) => ({
+    schema: 'squad-historical-audit/v1', scope: 'recent-candidates',
+    since: '2026-10-11T16:00:00.000Z', origins: [42], requestsUsed,
+  });
+
+  it('bounds automatic discovery pagination without returning a silently truncated success', async () => {
+    const listCommentsForRepo = vi.fn(async ({ page, since }: any) => {
+      expect(since).toBe('2026-10-11T16:00:00.000Z');
+      return { data: Array.from({ length: 100 }, (_, i) => ({ id: page * 100 + i, body: 'Ordinary discussion' })) };
+    });
+    const listComments = vi.fn();
+    await expect(collectHistoricalActivationRecords({
+      github: { rest: { issues: { listCommentsForRepo, listComments } } }, context: automaticContext(),
+    })).rejects.toThrow(/incomplete.*pagination/);
+    expect(listCommentsForRepo).toHaveBeenCalledTimes(5);
+    expect(listComments).not.toHaveBeenCalled();
+  });
+
+  it('accepts a complete automatic discovery at the exact page and origin limits using API Link termination', async () => {
+    const f = fixture();
+    const listCommentsForRepo = vi.fn(async ({ page }: any) => ({
+      data: Array.from({ length: 100 }, (_, i) => ({
+        ...f.comment(page * 100 + i, block('Structured data', envelope('activated'))),
+        issue_url: `https://api.github.com/repos/owner/repo/issues/${page}`,
+      })),
+      headers: page < 5 ? { link: '<https://api.github.com/next>; rel="next"' } : {},
+    }));
+    const listComments = vi.fn(async ({ issue_number }: any) => ({ data: [{
+      ...f.comment(issue_number, block('Structured data', { ...envelope('activated'), origin_issue: issue_number })),
+      issue_url: `https://api.github.com/repos/owner/repo/issues/${issue_number}`,
+    }], headers: {} }));
+    const audit = await collectHistoricalActivationRecords({
+      github: { rest: { issues: { listCommentsForRepo, listComments } } }, context: automaticContext(),
+    });
+    expect(audit).toMatchObject({ scope: 'recent-candidates', origins: [1, 2, 3, 4, 5], requestsUsed: 10 });
+    expect(audit.comments).toHaveLength(5);
+    expect(listCommentsForRepo).toHaveBeenCalledTimes(5);
+  });
+
+  it('distinguishes complete no-candidate discovery from API failures and missing trigger evidence', async () => {
+    const listCommentsForRepo = vi.fn(async () => ({ data: [] }));
+    const github = { rest: { issues: { listCommentsForRepo, listComments: vi.fn() } } };
+    expect(await collectHistoricalActivationRecords({ github, context: automaticContext() }))
+      .toMatchObject({ scope: 'recent-candidates', origins: [], comments: [], requestsUsed: 1 });
+    listCommentsForRepo.mockRejectedValueOnce(new Error('rate limited'));
+    await expect(collectHistoricalActivationRecords({ github, context: automaticContext() })).rejects.toThrow('rate limited');
+    await expect(collectHistoricalActivationRecords({
+      github, context: { ...automaticContext(), payload: {} },
+    })).rejects.toThrow(/timestamp is missing/);
+    expect(listCommentsForRepo).toHaveBeenCalledTimes(2);
+  });
+
+  it('follows explicit next links and rejects malformed or exhausted candidate discovery', async () => {
+    const f = fixture();
+    const candidate = f.comment(12, block('Structured data', envelope('activated')));
+    const listCommentsForRepo = vi.fn(async ({ page }: any) => page === 1
+      ? { data: [{ body: 'Discussion' }], headers: { link: '<https://api.github.com/page2>; rel="next"' } }
+      : { data: [candidate] });
+    const listComments = vi.fn(async () => ({ data: [candidate] }));
+    const github = { rest: { issues: { listCommentsForRepo, listComments } } };
+    expect(await collectHistoricalActivationRecords({ github, context: automaticContext() }))
+      .toMatchObject({ origins: [42], requestsUsed: 3 });
+    listCommentsForRepo.mockImplementation(async () => ({ data: [null] as any }));
+    await expect(collectHistoricalActivationRecords({ github, context: automaticContext() })).rejects.toThrow();
+    listCommentsForRepo.mockImplementation(async () => ({ data: Array.from({ length: 6 }, (_, i) => ({
+      ...candidate, issue_url: `https://api.github.com/repos/owner/repo/issues/${i + 1}`,
+    })) }));
+    listComments.mockClear();
+    await expect(collectHistoricalActivationRecords({ github, context: automaticContext() })).rejects.toThrow(/origin limit/);
+    expect(listComments).not.toHaveBeenCalled();
+  });
+
+  it('bounds complete origin pages and fails when a discovered origin has missing evidence', async () => {
+    const f = fixture();
+    const candidate = f.comment(12, block('Structured data', envelope('activated')));
+    const listCommentsForRepo = vi.fn(async () => ({ data: [candidate] }));
+    const listComments = vi.fn(async () => ({ data: Array.from({ length: 100 }, () => candidate) }));
+    const github = { rest: { issues: { listCommentsForRepo, listComments } } };
+    await expect(collectHistoricalActivationRecords({ github, context: automaticContext() })).rejects.toThrow(/pagination limit/);
+    expect(listComments).toHaveBeenCalledTimes(10);
+    listComments.mockImplementation(async () => ({ data: [] }));
+    await expect(collectHistoricalActivationRecords({ github, context: automaticContext() })).rejects.toThrow(/no activation evidence/);
+    const pending = f.comment(13, '```json\n{"schema":"squad-activation-pending/v1"}\n```');
+    listCommentsForRepo.mockImplementation(async () => ({ data: [pending] }));
+    listComments.mockImplementation(async () => ({ data: [pending] }));
+    await expect(collectHistoricalActivationRecords({ github, context: automaticContext() })).rejects.toThrow(/no activation evidence/);
+  });
+
+  it('manual full-history audit passes automatic discovery, origin and pagination limits without a time filter', async () => {
+    const f = fixture();
+    const candidate = f.comment(12, block('Structured data', envelope('activated')));
+    const listCommentsForRepo = vi.fn(async ({ page, ...params }: any) => {
+      expect(params).not.toHaveProperty('since');
+      return { data: page <= 6 ? Array.from({ length: 100 }, (_, i) => ({
+        ...candidate, id: page * 100 + i,
+        issue_url: `https://api.github.com/repos/owner/repo/issues/${page}`,
+      })) : [] };
+    });
+    const listComments = vi.fn(async ({ page, issue_number }: any) => ({ data: page <= 11
+      ? Array.from({ length: 100 }, (_, i) => ({ ...candidate, id: page * 100 + i,
+        issue_url: `https://api.github.com/repos/owner/repo/issues/${issue_number}` })) : [] }));
+    const audit = await collectHistoricalActivationRecords({
+      github: { rest: { issues: { listCommentsForRepo, listComments } } },
+      context: { ...automaticContext(), eventName: 'workflow_dispatch' },
+    });
+    expect(audit).toMatchObject({ scope: 'full-history', origins: [1, 2, 3, 4, 5, 6], requestsUsed: 79 });
+    expect(audit).not.toHaveProperty('since');
+    expect(audit.comments).toHaveLength(6600);
+  });
+
+  it('charges all canonical chain and label reads against the remaining automatic budget', async () => {
+    const f = recovery();
+    const head = await f.reconcile();
+    const calls: string[] = [];
+    await expect(runCollectedChecker(f, [f.original, head], {
+      audit: automaticAudit(249), onFetch: path => calls.push(path),
+    })).rejects.toThrow(/budget exhausted.*complete-chain/);
+    expect(calls).toHaveLength(1);
+    calls.length = 0;
+    const audit = automaticAudit(250);
+    const legacy = f.comment(99, [
+      block('Structured data', envelope('plan-accepted')),
+      block('Activation bindings', jsonBlock(head.body, 'Activation bindings')
+        .map((binding: any) => ({ ...binding, artifact: 'plan-accepted' }))),
+    ].join('\n'));
+    await expect(runCollectedChecker(f, [legacy], { audit, onFetch: path => calls.push(path) }))
+      .rejects.toThrow(/budget exhausted/);
+    expect(calls).toEqual([]);
+    const result = await runCollectedChecker(f, [f.original, head], {
+      audit: { ...audit, scope: 'full-history', requestsUsed: 1000 },
+    });
+    expect(result).toContain('Validated 2 activation bindings.');
+    expect(result.some(line => line.includes('scope: full-history'))).toBe(true);
+  });
+
+  it('fails automatic verification on truncated origin evidence and does not call it no candidates', async () => {
+    const f = fixture();
+    await expect(runCollectedChecker(f, [], { audit: automaticAudit() })).rejects.toThrow(/candidate evidence is missing/);
+    await expect(runCollectedChecker(f, [f.comment(1, 'Example: {"squad_artifact":"activated"}')], {
+      audit: automaticAudit(),
+    })).rejects.toThrow(/no validated activation evidence/);
+    const noCandidates = await runCollectedChecker(f, [], { audit: { ...automaticAudit(1), origins: [] } });
+    expect(noCandidates.some(line => line.includes('scope: recent-candidates'))).toBe(true);
+    expect(noCandidates).toContain('No historical activation artifact found; no current-run completion is asserted.');
+  });
+
+  it('stops canonical evidence pagination at the shared API budget instead of validating partial history', async () => {
+    const f = recovery();
+    const head = await f.reconcile();
+    for (let index = 0; index < 250; index++) f.comments.set(10000 + index, f.comment(10000 + index, 'Discussion'));
+    const calls: string[] = [];
+    await expect(runCollectedChecker(f, [f.original, head], {
+      audit: automaticAudit(246), onFetch: path => calls.push(path),
+    })).rejects.toThrow(/budget exhausted.*complete-chain/);
+    expect(calls).toHaveLength(4);
+    expect(calls.filter(path => path === 'issues/42/comments')).toHaveLength(2);
+    expect(await runCollectedChecker(f, [f.original, head], {
+      audit: { ...automaticAudit(1000), scope: 'full-history' },
+    })).toContain('Validated 2 activation bindings.');
+  });
+
+  it('mutation: removing the actual request-budget guard admits the same over-budget canonical audit', async () => {
+    const f = recovery();
+    const head = await f.reconcile();
+    const audit = automaticAudit(249);
+    await expect(runCollectedChecker(f, [f.original, head], { audit })).rejects.toThrow(/budget exhausted/);
+    const directory = join(f.root, 'mutant');
+    cpSync(join(process.cwd(), 'workflows/shared'), directory, { recursive: true });
+    const path = join(directory, 'check-agent-binding.mjs');
+    const source = readFileSync(path, 'utf8');
+    const guard = "if (requests >= requestBudget) incompleteAudit('API request budget exhausted during complete-chain verification');";
+    expect(source).toContain(guard);
+    writeFileSync(path, source.replace(guard, ''));
+    const mutant = await import(pathToFileURL(path).href);
+    const calls: string[] = [];
+    expect(await runCollectedChecker(f, [f.original, head], {
+      audit, checker: mutant.main, onFetch: path => calls.push(path),
+    })).toContain('Validated 2 activation bindings.');
+    expect(calls.length).toBeGreaterThan(1);
+  });
+
+  it.each(['.github/workflows/squad-agent-binding-check.yml', 'workflows/shared/squad-agent-binding-check.yml']
+    .flatMap(path => ['workflow_run', 'workflow_dispatch'].map(eventName => [path, eventName])))(
+    '%s executes %s historical audit, retaining old explicit predecessors without run attestation', async (path, eventName) => {
       const f = phasedFixture();
       const first = await f.prepare();
       await f.finalize(first, await f.create(first));
@@ -1651,26 +1848,42 @@ describe('live downstream verification', () => {
       expect(workflow.jobs.check.name).toContain('not current-run completion');
       const collector = workflow.jobs.check.steps.find((step: any) => step.with?.script);
       const files = new Map<string, string>();
-      const paginate = vi.fn(async (_method: any, params: any) => {
-        expect(params).not.toHaveProperty('since');
-        return clone([...f.comments.values()]);
+      const listCommentsForRepo = vi.fn(async (params: any) => {
+        if (eventName === 'workflow_run') expect(params.since).toBe('2026-09-30T00:01:00.000Z');
+        else expect(params).not.toHaveProperty('since');
+        // Only a new candidate is discovered; old predecessors still must be fetched.
+        return { data: eventName === 'workflow_run' ? [clone(f.latest())] : clone([...f.comments.values()]) };
       });
+      const listComments = vi.fn(async (params: any) => {
+        expect(params.issue_number).toBe(42);
+        expect(params).not.toHaveProperty('since');
+        return { data: clone([...f.comments.values()]) };
+      });
+      const workspace = path.startsWith('.github/') ? process.cwd() : f.root;
+      if (!path.startsWith('.github/')) {
+        mkdirSync(join(f.root, '.github/workflows'), { recursive: true });
+        cpSync(join(process.cwd(), 'workflows/shared'), join(f.root, '.github/workflows/shared'), { recursive: true });
+      }
       await compileFunction(`return (async () => { ${collector.with.script} })();`,
-        ['github', 'context', 'process', 'require'])(
-        { paginate, rest: { issues: { listCommentsForRepo: vi.fn() } } },
-        { repo: f.context.repo, payload: { workflow_run: {
+        ['github', 'context', 'process', 'require'],
+        { importModuleDynamically: constants.USE_MAIN_CONTEXT_DEFAULT_LOADER })(
+        { rest: { issues: { listCommentsForRepo, listComments } } },
+        { eventName, repo: f.context.repo, payload: { workflow_run: {
           id: 999, run_attempt: 2, run_started_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:01:00Z',
         } } },
-        { env: { RUNNER_TEMP: f.root } },
+        { env: { RUNNER_TEMP: f.root, GITHUB_WORKSPACE: workspace } },
         (name: string) => {
-          expect(name).toBe('node:fs');
-          return { writeFileSync: (path: string, body: string) => files.set(path, body) };
+          if (name === 'node:fs') return { writeFileSync: (path: string, body: string) => files.set(path, body) };
+          return createRequire(import.meta.url)(name);
         },
       );
-      const records = JSON.parse(files.get(join(f.root, 'activation-comments.json'))!);
+      expect(workflow.on).toHaveProperty('workflow_dispatch');
+      const audit = JSON.parse(files.get(join(f.root, 'activation-comments.json'))!);
+      expect(audit.scope).toBe(eventName === 'workflow_run' ? 'recent-candidates' : 'full-history');
+      const records = audit.comments;
       expect(records.map((record: any) => record.id)).toContain(original.id);
       expect(records.map((record: any) => record.id)).toContain(f.latest().id);
-      expect(await runCollectedChecker(f, records)).toContain('Validated 3 activation bindings.');
+      expect(await runCollectedChecker(f, records, { audit })).toContain('Validated 3 activation bindings.');
       expect(await runCollectedChecker(f, [])).toContain(
         'No historical activation artifact found; no current-run completion is asserted.',
       );

@@ -1414,7 +1414,24 @@ Run IDs asserted in comment bodies, time windows, artifact names and logs grant
 no completion authority. Existing validated acceptance/reconciliation retries
 remain explicit unchanged/no-create operations, not new publication claims.
 The native **Squad Agent Binding Check** is a separate historical current-state
-audit over repository comments, including old predecessors. Its success (including
+audit, including old predecessors. After each Squad completion (also Squad CI in
+this repository), automatic discovery reads comments updated since 24 hours before
+the triggering run's completion timestamp. This timestamp and comment contents
+are candidate-selection hints only, never current-run attribution or coverage
+proof. Discovery permits at most five pages of 100 comments and five candidate
+origins. Each selected origin is fetched without a time filter, up to ten pages of
+100 comments, and its complete required chain is verified by the canonical checks.
+Automatic collection plus verification share a hard budget of 250 API reads,
+including ancestry, permissions, issue labels and hierarchy reads. Pagination or
+candidate overflow, exhausted budgets, malformed discovery, and missing required
+evidence fail the audit explicitly as incomplete; they are not reported as no
+candidates or successful partial coverage. A complete discovery with no candidates
+is distinct and reports no historical artifact in this limited scope.
+
+Use **Actions → Squad Agent Binding Check → Run workflow** for the manual
+full-history audit: it has no discovery time filter or automatic page/origin/API
+caps and may require substantial API quota. API failures still fail the audit.
+Automatic success is not a repository-wide historical coverage claim. Its success (including
 an empty history) does **not** prove that the triggering run produced output.
 These are point-in-time API checks, not a transaction or a guarantee against
 later edits; changed historical state can fail a subsequent audit.

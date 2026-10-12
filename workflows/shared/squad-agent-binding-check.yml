@@ -1,6 +1,7 @@
 name: Squad Agent Binding Check
 
 on:
+  workflow_dispatch:
   workflow_run:
     workflows: [Squad]
     types: [completed]
@@ -25,15 +26,12 @@ jobs:
         with:
           script: |
             const fs = require('node:fs');
-            // Only the synchronous trusted writer verifies current-run publication.
-            // Preserve complete history here, including explicit predecessor records.
-            const comments = await github.paginate(github.rest.issues.listCommentsForRepo, {
-              ...context.repo, per_page: 100,
-            });
-            const records = comments
-              .filter(comment => /"squad_artifact"\s*:\s*"(?:activated|phases-activated|plan-accepted|phases-accepted|activation-reconciled)"/.test(comment.body ?? ''))
-              .map(comment => ({ id: comment.id, body: comment.body, issue: Number(comment.issue_url.split('/').at(-1)) }));
-            fs.writeFileSync(`${process.env.RUNNER_TEMP}/activation-comments.json`, JSON.stringify(records));
+            const { pathToFileURL } = require('node:url');
+            const { join } = require('node:path');
+            const { collectHistoricalActivationRecords } = await import(pathToFileURL(
+              join(process.env.GITHUB_WORKSPACE, '.github/workflows/shared/check-agent-binding.mjs')).href);
+            const audit = await collectHistoricalActivationRecords({ github, context });
+            fs.writeFileSync(`${process.env.RUNNER_TEMP}/activation-comments.json`, JSON.stringify(audit));
       - name: Audit historical bindings without asserting current-run completion
         env:
           GITHUB_TOKEN: ${{ github.token }}

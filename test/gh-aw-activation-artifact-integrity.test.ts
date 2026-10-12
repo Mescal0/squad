@@ -640,11 +640,13 @@ const COLLECTOR_ARTIFACT_REGEX_SOURCE =
 describe('gh-aw: squad-agent-binding-check.yml collector passes fast-path artifacts to the checker (E4 preflight A)', () => {
   const ymlContent = readText(COLLECTOR_YML);
 
-  it('embeds the exact artifact-matching regex used to filter collected comments', () => {
-    expect(ymlContent).toContain(COLLECTOR_ARTIFACT_REGEX_SOURCE);
+  it('delegates discovery to the canonical collector with the exact artifact-matching regex', () => {
+    expect(ymlContent).toContain('await collectHistoricalActivationRecords({ github, context })');
+    expect(readText(join(WORKFLOWS_DIR, 'shared', 'check-agent-binding.mjs')))
+      .toContain(COLLECTOR_ARTIFACT_REGEX_SOURCE);
   });
 
-  it('the embedded regex matches every activation artifact type (fast-path and granular)', () => {
+  it('the shared discovery regex matches every activation artifact type (fast-path and granular)', () => {
     const collectorRegex = new RegExp(COLLECTOR_ARTIFACT_REGEX_SOURCE, 'i');
     for (const artifactType of ['activated', 'phases-activated', 'plan-accepted', 'phases-accepted', 'activation-reconciled']) {
       expect(
@@ -654,7 +656,7 @@ describe('gh-aw: squad-agent-binding-check.yml collector passes fast-path artifa
     }
   });
 
-  it('the embedded regex does not indiscriminately match unrelated non-activation artifacts', () => {
+  it('the shared discovery regex does not indiscriminately match unrelated non-activation artifacts', () => {
     const collectorRegex = new RegExp(COLLECTOR_ARTIFACT_REGEX_SOURCE, 'i');
     for (const artifactType of ['research', 'triage', 'scope-accepted', 'impl-accepted', 'impl-phases-accepted', 'validation']) {
       expect(

@@ -991,15 +991,88 @@ export function selectActivationRecord(records, registryValue, context) {
   return validated.get(heads[0]).selected;
 }
 
-function readOnlyGithub(repo, token) {
+const AUTOMATIC_AUDIT_LIMITS = Object.freeze({ requests: 250, discoveryPages: 5, origins: 5, originPages: 10 });
+
+function incompleteAudit(reason) {
+  throw new Error(`Historical audit incomplete: ${reason}; run the manual full-history audit`);
+}
+
+/** Timestamps select historical candidates only; they never attest current-run output. */
+export async function collectHistoricalActivationRecords({ github, context }) {
+  const automatic = context.eventName === 'workflow_run';
+  if (!automatic && context.eventName !== 'workflow_dispatch') incompleteAudit('unsupported audit event');
+  let requestsUsed = 0;
+  const readPages = async (method, params, limit = Infinity) => {
+    const all = [];
+    for (let page = 1; ; page++) {
+      if (page > limit) incompleteAudit('comment pagination limit exhausted');
+      if (automatic && requestsUsed >= AUTOMATIC_AUDIT_LIMITS.requests) incompleteAudit('API request budget exhausted');
+      requestsUsed++;
+      const response = await method({ ...params, per_page: 100, page });
+      if (!Array.isArray(response.data) || response.data.length > 100 ||
+        response.data.some(comment => !comment || typeof comment.body !== 'string')) {
+        incompleteAudit('comment discovery returned malformed records');
+      }
+      all.push(...response.data);
+      const next = /<[^>]+>;\s*rel="next"/.test(response.headers?.link ?? '');
+      if (!next && (response.headers !== undefined || response.data.length < 100)) return all;
+    }
+  };
+  let since;
+  if (automatic) {
+    const completed = Date.parse(context.payload.workflow_run?.updated_at);
+    if (!Number.isFinite(completed)) incompleteAudit('trigger completion timestamp is missing');
+    since = new Date(completed - 24 * 60 * 60 * 1000).toISOString();
+  }
+  const discovered = await readPages(github.rest.issues.listCommentsForRepo, {
+    ...context.repo, sort: 'updated', direction: 'asc', ...(automatic ? { since } : {}),
+  }, automatic ? AUTOMATIC_AUDIT_LIMITS.discoveryPages : Infinity);
+  const candidate = comment => /"squad_artifact"\s*:\s*"?(?:phases-activated|activated|phases-accepted|plan-accepted|activation-reconciled)|squad-activation-pending\/v1/i
+    .test(comment.body ?? '');
+  const originFor = comment => {
+    const prefix = `https://api.github.com/repos/${context.repo.owner}/${context.repo.repo}/issues/`;
+    const value = String(comment.issue_url ?? '');
+    const number = value.startsWith(prefix) ? Number(value.slice(prefix.length)) : NaN;
+    if (!Number.isSafeInteger(number) || number <= 0) incompleteAudit('candidate origin identity is missing');
+    return number;
+  };
+  const origins = [...new Set(discovered.filter(candidate).map(originFor))];
+  if (automatic && origins.length > AUTOMATIC_AUDIT_LIMITS.origins) incompleteAudit('candidate origin limit exhausted');
+  const comments = [];
+  for (const origin of origins) {
+    // Always fetch the complete origin, including predecessors older than discovery.
+    const history = await readPages(github.rest.issues.listComments, {
+      ...context.repo, issue_number: origin,
+    }, automatic ? AUTOMATIC_AUDIT_LIMITS.originPages : Infinity);
+    const records = history.filter(candidate).map(comment => {
+      if (originFor(comment) !== origin || !Number.isSafeInteger(comment.id) || comment.id <= 0) {
+        incompleteAudit('origin history identity changed');
+      }
+      return { id: comment.id, body: comment.body, issue: origin };
+    });
+    if (!records.some(record => ACTIVATION_ARTIFACT_PATTERN.test(record.body))) {
+      incompleteAudit(`origin #${origin} has no activation evidence`);
+    }
+    comments.push(...records.filter(record => ACTIVATION_ARTIFACT_PATTERN.test(record.body)));
+  }
+  return {
+    schema: 'squad-historical-audit/v1', scope: automatic ? 'recent-candidates' : 'full-history',
+    ...(automatic ? { since } : {}), requestsUsed, origins, comments,
+  };
+}
+
+function readOnlyGithub(repo, token, requestBudget = Infinity) {
+  let requests = 0;
   const request = async (path, page) => {
+    if (requests >= requestBudget) incompleteAudit('API request budget exhausted during complete-chain verification');
+    requests++;
     const response = await fetch(`https://api.github.com/repos/${repo}/${path}${page ? `?per_page=100&page=${page}` : ''}`, {
       headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`,
         'X-GitHub-Api-Version': '2022-11-28' },
     });
     if (!response.ok) throw Object.assign(new Error(`Reconciliation evidence API returned ${response.status}`),
       { status: response.status });
-    return { data: await response.json() };
+    return { data: await response.json(), headers: { link: response.headers.get('link') ?? '' } };
   };
   const rest = {
     issues: {
@@ -1014,26 +1087,20 @@ function readOnlyGithub(repo, token) {
   return { rest, paginate: async (method, params) => {
     const all = [];
     for (let page = 1; ; page++) {
-      const { data } = await method({ ...params, page });
+      const { data, headers } = await method({ ...params, page });
       if (!Array.isArray(data)) throw new Error('Evidence pagination returned a non-array');
       all.push(...data);
-      if (data.length < 100) return all;
+      if (!/<[^>]+>;\s*rel="next"/.test(headers?.link ?? '') &&
+        (headers !== undefined || data.length < 100)) return all;
     }
   } };
 }
 
-async function fetchLabels(repo, issues, token) {
+async function fetchLabels(github, repo, issues) {
   const labels = new Map();
+  const [owner, name] = repo.split('/');
   for (const issue of issues) {
-    const response = await fetch(`https://api.github.com/repos/${repo}/issues/${issue}`, {
-      headers: {
-        Accept: 'application/vnd.github+json',
-        Authorization: `Bearer ${token}`,
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
-    });
-    if (!response.ok) throw new Error(`issue #${issue}: GitHub API returned ${response.status}`);
-    const body = await response.json();
+    const { data: body } = await github.rest.issues.get({ owner, repo: name, issue_number: issue });
     labels.set(issue, new Set(body.labels.map(label => normalize(typeof label === 'string' ? label : label.name))));
   }
   return labels;
@@ -1125,12 +1192,35 @@ export async function main() {
   const token = process.env.GITHUB_TOKEN;
   if (!token) throw new Error('GITHUB_TOKEN is required for activation binding checks');
 
-  const comments = args['comments-file']
+  const input = args['comments-file']
     ? JSON.parse(await readFile(args['comments-file'], 'utf8'))
     : [{ body: await readFile(args['comment-file'], 'utf8') }];
+  let requestBudget = Infinity;
+  let auditScope;
+  let comments = input;
+  if (!Array.isArray(input)) {
+    if (input?.schema !== 'squad-historical-audit/v1' ||
+      !['recent-candidates', 'full-history'].includes(input.scope) ||
+      !Number.isSafeInteger(input.requestsUsed) || input.requestsUsed < 0 ||
+      !Array.isArray(input.origins) || input.origins.some(origin => !Number.isSafeInteger(origin) || origin <= 0) ||
+      new Set(input.origins).size !== input.origins.length || !Array.isArray(input.comments)) {
+      incompleteAudit('collector result is missing or malformed');
+    }
+    auditScope = input.scope;
+    comments = input.comments;
+    if (auditScope === 'recent-candidates') {
+      if (!Number.isFinite(Date.parse(input.since)) || input.origins.length > AUTOMATIC_AUDIT_LIMITS.origins ||
+        input.requestsUsed > AUTOMATIC_AUDIT_LIMITS.requests) incompleteAudit('invalid automatic discovery scope or budget');
+      requestBudget = AUTOMATIC_AUDIT_LIMITS.requests - input.requestsUsed;
+    }
+    if (comments.some(comment => !input.origins.includes(comment.issue)) ||
+      input.origins.some(origin => !comments.some(comment => comment.issue === origin))) {
+      incompleteAudit('collector candidate evidence is missing');
+    }
+  }
   if (!Array.isArray(comments)) throw new Error('comments file must contain an array');
 
-  const github = readOnlyGithub(args.repo, token);
+  const github = readOnlyGithub(args.repo, token, requestBudget);
   const [owner, repo] = args.repo.split('/');
   const root = dirname(dirname(args['team-file']));
   const { verifyReconciliationRequest, selectionEvidence, frozenAssignments, verifyPublishedActivation, activationHistoryHead } =
@@ -1169,6 +1259,7 @@ export async function main() {
     verifiedIds.add(selected.id);
   }
   let checked = 0;
+  const auditedOrigins = new Set();
   for (const comment of comments) {
     if (superseded.has(comment.id)) continue;
     const artifact = parseStructuredData(comment.body ?? '');
@@ -1193,13 +1284,14 @@ export async function main() {
     const issues = Array.isArray(artifact.bindings)
       ? artifact.bindings.flatMap(binding => [extractIssueNumber(binding?.issue), extractIssueNumber(binding?.epic_issue)]).filter(Number.isInteger)
       : [];
-    const labels = await fetchLabels(args.repo, [...new Set(issues)], token);
+    const labels = await fetchLabels(github, args.repo, [...new Set(issues)]);
     const result = validateActivation(artifact, roster, labels, comment.issue, {
       repository: args.repo,
       registry,
       epicAssignments: assignments.get(comment),
     });
     checked += result.checked;
+    auditedOrigins.add(artifact.origin_issue);
   }
   for (const origin of historyOrigins) {
     const current = await github.paginate(github.rest.issues.listComments, {
@@ -1208,6 +1300,10 @@ export async function main() {
     const head = activationHistoryHead(current, origin, args.repo);
     if (!verifiedIds.has(head)) throw new Error('Current activation head was not independently verified from the collected input');
   }
+  if (auditScope && input.origins.some(origin => !auditedOrigins.has(origin))) {
+    incompleteAudit('a candidate origin has no validated activation evidence');
+  }
+  if (auditScope) console.log(`Historical audit scope: ${auditScope}; no current-run completion or repository-wide coverage outside that scope is asserted.`);
   console.log(checked === 0 ? 'No historical activation artifact found; no current-run completion is asserted.'
     : `Validated ${checked} activation bindings.`);
 }
