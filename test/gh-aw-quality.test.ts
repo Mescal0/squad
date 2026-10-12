@@ -1678,14 +1678,8 @@ describe('gh-aw: compiled workflow shell input security contract', () => {
     // real deployment layout so `squad-implement-worker` resolves as it will in
     // every real install.
     cpSync(WORKFLOWS_DIR, join(workspace, '.github', 'workflows'), { recursive: true });
-    // CI compiles with --approve after review. The newly approved action is
-    // SHA-pinned to this repository and only downloads checksum-verified release
-    // assets; it receives no secret input.
-    execFileSync('gh', ['aw', 'compile', '.github/workflows/squad.md', '--strict', '--approve'], {
-      cwd: workspace,
-      encoding: 'utf8',
-      stdio: 'pipe',
-    });
+    // Match consumer compilation: seed and verify immutable compiler-action pins.
+    compileWithPinnedActions(workspace);
 
     const lockPath = join(workspace, '.github', 'workflows', 'squad.lock.yml');
     if (!existsSync(lockPath)) {
