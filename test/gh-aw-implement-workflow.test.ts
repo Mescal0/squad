@@ -148,8 +148,10 @@ describe('gh-aw implement workflows', () => {
   });
 
   it('bounds dispatch and serializes workers for the same issue', () => {
-    const dispatcherDispatch = yamlBlock(dispatcherFrontmatter, 'dispatch-workflow');
-    const configuredWorkerTargets = listInBlock(dispatcherDispatch, 'workflows');
+    const dispatcherDispatch = yamlBlock(
+      dispatcherFrontmatter,
+      'dispatch-implementation-workers',
+    );
     const dispatchMax = Number(scalarInBlock(dispatcherDispatch, 'max'));
     const slotCap = Number(dispatcher.match(/available-slots = max\(0, (\d+) - active-implementation-count\)/)?.[1]);
 
@@ -159,11 +161,13 @@ describe('gh-aw implement workflows', () => {
     expect(workerFrontmatter).not.toMatch(/^      aw_context:/m);
     expect(dispatcher).toContain('github.event.inputs.aw_context');
     expect(worker).toContain('github.event.inputs.aw_context');
-    expect(configuredWorkerTargets).toContain('squad-implement-worker');
+    expect(dispatcherDispatch).toContain('one to three');
+    expect(dispatcherDispatch).toContain('squad-implement-worker or squad-deps-worker');
     expect(dispatchMax).toBeGreaterThan(0);
-    expect(dispatchMax).toBeLessThanOrEqual(slotCap);
+    expect(dispatchMax).toBe(1);
+    expect(slotCap).toBe(3);
     expect(dispatcher).toContain('Never call the generic `dispatch_workflow` tool');
-    expect(dispatcher).toContain('Never emit a dispatch without a');
+    expect(dispatcher).toContain('Never provide or guess session IDs, run IDs, attempts, or receipts');
     expect(worker).toContain(
       'group: "squad-implement-${{ github.event.inputs.issue_number || github.event.pull_request.number }}"',
     );
