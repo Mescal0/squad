@@ -633,7 +633,10 @@ describe('#1758.2: Implement dispatches leaf tasks, not epics', () => {
     const dispatch = squad.match(/##### Epic Dispatch([\s\S]*?)## skill:/)?.[1] ?? '';
     expect(dispatch).toContain('For each open leaf task');
     expect(dispatch).toContain('squad/implement-{leaf-number}-');
-    expect(dispatch).toContain('"issue_number": "{leaf-issue-number}"');
+    expect(dispatch).toContain('dispatch_implementation_workers');
+    expect(dispatch).toContain('"issue_number": 123');
+    expect(dispatch).toContain('"worker": "squad-implement-worker"');
+    expect(dispatch).not.toContain('implementation_session_id');
     // The immediate-children language that caused the bug must be gone.
     expect(dispatch).not.toContain('For each open child issue');
   });

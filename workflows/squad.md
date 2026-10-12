@@ -526,6 +526,95 @@ safe-outputs:
                 'Stderr:',
                 failure.stderr,
               ].join('\n'));
+    dispatch-implementation-workers:
+      name: Dispatch verified Squad implementation workers
+      description: Write target-bound receipts and dispatch native worker identities for one to three selected issues.
+      runs-on: ubuntu-slim
+      needs: safe_outputs
+      if: needs.safe_outputs.result == 'success'
+      permissions:
+        actions: write
+        contents: read
+        issues: write
+      max: 1
+      output: Verified implementation worker dispatches completed.
+      inputs:
+        dispatches_json:
+          description: >-
+            JSON array of one to three unique objects, sorted by issue number,
+            with exactly issue_number (positive integer) and worker
+            (squad-implement-worker or squad-deps-worker).
+          required: true
+          type: string
+      steps:
+        - name: Checkout the executing workflow commit for dispatch provenance
+          uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+          with:
+            ref: ${{ github.workflow_sha }}
+            persist-credentials: false
+            path: .squad-trusted-base
+        - name: Write verified receipts and dispatch native workers
+          uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+          env:
+            SQUAD_DISPATCH_REPOSITORY: ${{ github.repository }}
+            SQUAD_DISPATCH_REPOSITORY_ID: ${{ github.event.repository.id }}
+            SQUAD_DISPATCH_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+            SQUAD_DISPATCH_RUN_ID: ${{ github.run_id }}
+            SQUAD_DISPATCH_RUN_ATTEMPT: ${{ github.run_attempt }}
+          with:
+            script: |
+              const { readFileSync } = await import('node:fs');
+              const { join } = await import('node:path');
+              const { pathToFileURL } = await import('node:url');
+              const outputPath = process.env.GH_AW_AGENT_OUTPUT;
+              if (!outputPath) throw new Error('GH_AW_AGENT_OUTPUT is unavailable.');
+              const output = JSON.parse(readFileSync(outputPath, 'utf8'));
+              if (!output || !Array.isArray(output.items)) {
+                throw new Error('Agent output does not contain an items array.');
+              }
+              const items = output.items.filter(
+                item => item?.type === 'dispatch_implementation_workers',
+              );
+              if (items.length !== 1 || typeof items[0].dispatches_json !== 'string') {
+                throw new Error(`Expected one dispatch_implementation_workers item, found ${items.length}.`);
+              }
+
+              const trustedRoot = join(process.env.GITHUB_WORKSPACE, '.squad-trusted-base');
+              const provenance = await import(pathToFileURL(join(
+                trustedRoot,
+                '.github/workflows/shared/squad-implementation-provenance.mjs',
+              )).href);
+              const [owner, repo] = process.env.SQUAD_DISPATCH_REPOSITORY.split('/');
+              const fetchJson = async (route, fields) =>
+                (await github.request(`GET /${route}`, fields)).data;
+              const result = await provenance.dispatchImplementationWorkers({
+                requests: JSON.parse(items[0].dispatches_json),
+                repository: process.env.SQUAD_DISPATCH_REPOSITORY,
+                repositoryId: process.env.SQUAD_DISPATCH_REPOSITORY_ID,
+                defaultBranch: process.env.SQUAD_DISPATCH_DEFAULT_BRANCH,
+                runId: process.env.SQUAD_DISPATCH_RUN_ID,
+                runAttempt: process.env.SQUAD_DISPATCH_RUN_ATTEMPT,
+                fetchJson,
+                createComment: async (repository, issueNumber, body) => {
+                  const [targetOwner, targetRepo] = repository.split('/');
+                  await github.rest.issues.createComment({
+                    owner: targetOwner,
+                    repo: targetRepo,
+                    issue_number: issueNumber,
+                    body,
+                  });
+                },
+                dispatchWorkflow: async ({ workflowId, ref, inputs }) => {
+                  await github.rest.actions.createWorkflowDispatch({
+                    owner,
+                    repo,
+                    workflow_id: workflowId,
+                    ref,
+                    inputs,
+                  });
+                },
+              });
+              core.info(`Verified and dispatched ${result.length} implementation worker(s).`);
   data:
     type: object
     properties:
@@ -598,7 +687,7 @@ safe-outputs:
     max: 20
     target: "*"
   dispatch-workflow:
-    workflows: [squad-implement-worker, squad-deps-worker, squad-retro, squad-improvement-worker]
+    workflows: [squad-retro, squad-improvement-worker]
     max: 3
 ---
 
@@ -1521,8 +1610,9 @@ leaves. Merged implementation PRs relay back here to refill available slots.
    parent and follow the Epic Dispatch procedure below over the leaf-task set.
    Do not implement the parent body directly.
 6. Classify every leaf with the **Dependency Route Decision** below.
-7. For a leaf target, post the exact five-line receipt below before calling the
-   selected worker with the four session fields in the Epic Dispatch JSON.
+7. For a leaf target, select its worker using the **Dependency Route Decision**
+   and submit it through the deterministic dispatch handler below. Do not author
+   its receipt or session fields.
 
 ```text
 Squad-Implementation-Dispatch: ${{ github.repository }}#{issue-number} worker={squad-implement-worker-or-squad-deps-worker}
@@ -1582,25 +1672,30 @@ For each open leaf task in the target's descendant set:
 5. Exclude active implementation tasks from the ready set.
 6. Sort ready leaf tasks by issue number and select at most `available-slots`.
 
-For each selected leaf task, apply the **Dependency Route Decision**, then call
-exactly one selected workflow-specific safe-output tool with this input:
+For each selected leaf task, apply the **Dependency Route Decision**, then
+include one exact target object in a single
+`dispatch_implementation_workers` safe-output call. `dispatches_json` is a
+JSON array of one to three objects with exactly `issue_number` (positive
+integer) and `worker` (the selected worker name), sorted in ascending
+issue-number order. The deterministic handler writes and verifies the target's
+five-line bot receipt, then supplies the exact native session and dispatcher
+identity fields to the selected workflow.
 
 ```json
-{
-  "issue_number": "{leaf-issue-number}",
-  "implementation_session_id": "squad-implementation-session/v1/${{ github.event.repository.id }}/${{ github.run_id }}",
-  "implementation_session_origin_workflow": ".github/workflows/squad.lock.yml",
-  "implementation_session_origin_run_id": "${{ github.run_id }}",
-  "implementation_session_origin_run_attempt": "{current-GITHUB_RUN_ATTEMPT-integer}"
-}
+[
+  {
+    "issue_number": 123,
+    "worker": "squad-implement-worker"
+  }
+]
 ```
 
-Never call the generic `dispatch_workflow` tool. Before each selected-worker
-call, post the five-line receipt with its worker and numeric
-`GITHUB_RUN_ATTEMPT`. Never emit a dispatch without a numeric `issue_number`,
-the exact session ID, and all three dispatcher-origin inputs above. Never call both workers for one issue.
-Report success only after the selected tool succeeds. A dependency-config denial
-leaves its slot unused; do not reroute it to the general worker.
+Never call the generic `dispatch_workflow` tool for an implementation worker.
+Never provide or guess session IDs, run IDs, attempts, or receipts; the
+deterministic handler derives and verifies them. Never dispatch duplicate or
+unsorted issue targets or call both workers for one issue. Report success only
+after the safe-output handler succeeds. A dependency-config denial leaves its
+slot unused; do not reroute it to the general worker.
 
 Post a comment on the target listing the dispatched leaf tasks, blocked leaf
 tasks, the worker selected for each dispatch, dependency tasks denied by config,
