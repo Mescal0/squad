@@ -27,3 +27,6 @@ independent verifier proof and exact source links form one fully consumed chain
 with consistent frozen snapshots, expanding phases, and preserved prior mappings.
 Ignore unrelated discussion in scoped pairs and complete histories while retaining
 rejection of extra activation or pending candidates and ambiguous chains.
+Require a nonempty, strictly shorter positional phase prefix across ancestors;
+reject whole-plan phase expansion and explicitly selected phases absent from the
+frozen plan without requiring consecutive phase IDs.

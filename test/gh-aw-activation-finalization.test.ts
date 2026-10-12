@@ -2059,6 +2059,210 @@ describe('live downstream verification', () => {
   });
 });
 
+describe('actual producer and verifier phase ancestry matrix', () => {
+  let installed: ReturnType<typeof createFirstInstallFixture>;
+  beforeAll(() => {
+    installed = createFirstInstallFixture('a'.repeat(40), 'package');
+  }, 180_000);
+
+  const cases: Array<{
+    name: string; plan: number[]; scopes: Array<number[] | undefined>;
+    invalid?: boolean; requestScope?: 'omitted' | number[]; dependency?: boolean;
+    guardMutation?: 'prefix' | 'whole-plan' | 'existence';
+  }> = [
+    { name: 'whole plan with omitted request scope', plan: [1, 2], scopes: [undefined] },
+    { name: 'whole plan with explicit empty scope', plan: [1, 2], scopes: [[]] },
+    { name: 'standalone scoped pair', plan: [1, 2], scopes: [[1]] },
+    { name: 'ordered three-node growth', plan: [1, 2, 3], scopes: [[1], [1, 2], [1, 2, 3]], dependency: true },
+    { name: 'sparse ordered growth', plan: [1, 3, 9], scopes: [[1], [1, 3], [1, 3, 9]], dependency: true },
+    { name: 'reordered child', plan: [1, 2], scopes: [[1], [2, 1]], invalid: true },
+    { name: 'nonprefix insertion at start', plan: [1, 2], scopes: [[2], [1, 2]], invalid: true, guardMutation: 'prefix' },
+    { name: 'nonprefix insertion in middle', plan: [1, 2, 3], scopes: [[1, 3], [1, 2, 3]], invalid: true, guardMutation: 'prefix' },
+    { name: 'duplicate child phase', plan: [1, 2], scopes: [[1], [1, 1, 2]], invalid: true },
+    { name: 'non-growing child', plan: [1, 2], scopes: [[1], [1]], invalid: true },
+    { name: 'omitted scoped request', plan: [1, 2], scopes: [[1]], requestScope: 'omitted', invalid: true },
+    { name: 'widened scoped request', plan: [1, 2], scopes: [[1]], requestScope: [1, 2], invalid: true },
+    { name: 'omitted whole-plan predecessor expansion', plan: [1], scopes: [undefined, [1]], invalid: true },
+    { name: 'explicit whole-plan predecessor expansion', plan: [1], scopes: [[], [1]], invalid: true, guardMutation: 'whole-plan' },
+    { name: 'nonexistent child phase with unchanged maps', plan: [1], scopes: [[1], [1, 999]], invalid: true, guardMutation: 'existence' },
+    { name: 'nonexistent phase mixed with an existing phase', plan: [1], scopes: [[1, 999]], invalid: true, guardMutation: 'existence' },
+    { name: 'scope omitting a dependency', plan: [1, 3], scopes: [[3]], dependency: true, invalid: true },
+  ];
+
+  it.each(cases.flatMap(testCase => ['activation', 'pending'].map(sourceKind => ({ ...testCase, sourceKind }))))(
+    '$sourceKind: $name', async ({ plan: phaseIds, scopes, sourceKind, invalid, requestScope, dependency, guardMutation }) => {
+      const f = fixture({ epic: true });
+      f.comments.get(10)!.body = [
+        '# Frozen phased implementation',
+        ...phaseIds.flatMap((phase, index) => [
+          `### Phase ${phase}`,
+          '| # | Title | Agent | Agent ID | Depends On | Epic |',
+          '|---|---|---|---|---|---|',
+          `| ${phase} | Task ${phase} | Builder | builder | ${dependency && index ? phaseIds[index - 1] : '—'} | example |`,
+        ]),
+        block('Structured data', envelope('implementation')),
+      ].join('\n');
+      let capture = await f.prepare();
+      let baseline: { emitted: any; reservation: any; bindings: any[] } | undefined;
+      if (invalid) {
+        const journal = await f.create(capture);
+        await f.finalize(capture, journal);
+        const emitted = f.accepted()[0];
+        const reservation = f.comments.get(journal.pending_comment_id)!;
+        baseline = { emitted, reservation, bindings: parseStructuredData(emitted.body).bindings };
+        f.comments.delete(emitted.id);
+        f.comments.delete(reservation.id);
+      }
+
+      const packagedRoot = join(f.root, 'packaged');
+      mkdirSync(packagedRoot, { recursive: true });
+      for (const [path, bytes] of installed.consumerFiles) {
+        if (path.startsWith('.github/workflows/shared/')) {
+          writeFileSync(join(packagedRoot, path.slice('.github/workflows/shared/'.length)), bytes);
+        }
+      }
+      const packaged = await import(pathToFileURL(join(packagedRoot, 'check-agent-binding.mjs')).href);
+      const packagedRuntime = await import(pathToFileURL(join(packagedRoot, 'squad-activation.mjs')).href);
+      const records: any[] = [f.comment(9000, 'Ordinary discussion, not activation evidence.', operator)];
+      f.comments.set(records[0].id, records[0]);
+      const proofs: any[] = [];
+      let previous: { source: any; result: any } | undefined;
+      let validatedBindings = 0;
+      for (const [index, scope] of scopes.entries()) {
+        const phases = scope ?? [];
+        let source: any;
+        let rows: any[];
+        if (baseline) {
+          const { emitted, reservation, bindings } = baseline;
+          rows = bindings.filter(row => !phases.length || phases.includes(Number(row.task)));
+          const prior = previous ? {
+            source_comment_id: previous.source.id, source_sha256: digest(previous.source.body),
+            reconciliation_comment_id: previous.result.id, reconciliation_sha256: digest(previous.result.body),
+          } : undefined;
+          // Invalid historical inputs mutate actual producer output, never fabricate verifier proofs.
+          let body = emitted.body
+            .replace(JSON.stringify(jsonBlock(emitted.body, 'Structured data')),
+              JSON.stringify({ ...jsonBlock(emitted.body, 'Structured data'), phases }))
+            .replace(JSON.stringify(bindings), JSON.stringify(rows))
+            .replace(JSON.stringify(jsonBlock(emitted.body, 'Activation evidence')),
+              JSON.stringify({ ...jsonBlock(emitted.body, 'Activation evidence'), ...(prior ? { prior } : {}) }));
+          if (sourceKind === 'pending') {
+            const pendingData = JSON.parse(reservation.body.split('```json\n')[1].split('\n```')[0]);
+            body = reservation.body.replace(JSON.stringify(pendingData),
+              JSON.stringify({ ...pendingData, phases, ...(prior ? { prior } : {}) }));
+          }
+          source = f.comment(2000 + index, body);
+          f.comments.set(source.id, source);
+        } else {
+          f.context.payload.comment.body = `/squad plan activate${phases.length ? ` phase ${phases.at(-1)}` : ''}`;
+          f.env.GITHUB_RUN_ID = String(910 + index);
+          capture = await f.prepare();
+          const journal = await f.create(capture);
+          rows = buildActivationBindings(capture, journal);
+          if (sourceKind === 'activation') {
+            await f.finalize(capture, journal);
+            source = [...f.comments.values()].filter(comment => comment.body.includes('Activation evidence:')).at(-1)!;
+          } else {
+            source = f.comments.get(journal.pending_comment_id)!;
+          }
+        }
+        const creates = f.createIssue.mock.calls.length;
+        const issueSnapshot = clone([...f.issues.entries()]);
+        const request: any = {
+          schema: 'squad-activation-reconciliation-request/v1', repository, origin_issue: 42,
+          ...(sourceKind === 'pending' ? { source_kind: 'pending' } : {}),
+          original: { comment_id: source.id, sha256: digest(source.body) },
+          plan: { comment_id: 10, sha256: digest(f.comments.get(10)!.body) },
+          registry: { revision: 1, sha256: digest(f.registry) },
+          tasks: rows.map((row: any) => ({ task: row.task, issue: Number(row.issue.slice(1)), temporary_id: null })),
+          epics: [{ epic: 'example', issue: Number(rows[0].epic_issue.slice(1)) }],
+          ...(scope === undefined ? {} : { phases }),
+        };
+        if (requestScope === 'omitted') delete request.phases;
+        else if (requestScope) request.phases = requestScope;
+        const requestComment = f.comment(3000 + index, block('Activation reconciliation request', request), operator);
+        f.comments.set(requestComment.id, requestComment);
+        f.context.payload.comment.body =
+          `/squad reconcile activation ${requestComment.id} ${digest(requestComment.body)}`;
+        const verifyOptions = {
+          github: f.github, context: f.context, root: f.root,
+          requestCommentId: requestComment.id, requestSha256: digest(requestComment.body),
+        };
+        const verify = () => verifyReconciliationRequest(verifyOptions);
+        const reconcileOptions = { github: f.github, context: f.context, env: f.env, root: f.root };
+        const selectionContext = { repository, originIssue: 42, reconciliations: proofs,
+          epicAssignments: frozenAssignments(capture.fullPlan) };
+        const writes = f.writes.length;
+        if (invalid && index === scopes.length - 1) {
+          await expect(verify()).rejects.toThrow(/phase|coverage|dependency|metadata/);
+          await expect(packagedRuntime.verifyReconciliationRequest(verifyOptions))
+            .rejects.toThrow(/phase|coverage|dependency|metadata/);
+          await expect(reconcileActivation(reconcileOptions)).rejects.toThrow(/phase|coverage|dependency|metadata/);
+          expect(f.writes).toHaveLength(writes);
+          expect(proofs.some(proof => proof.sourceCommentId === source.id)).toBe(false);
+          if (guardMutation) {
+            const mutantRoot = join(f.root, 'mutant');
+            cpSync(packagedRoot, mutantRoot, { recursive: true });
+            const path = join(mutantRoot, 'squad-activation.mjs');
+            const runtime = readFileSync(path, 'utf8');
+            const [guard, replacement] = {
+              prefix: [
+                'previous.request.phases.every((phase, index) => request.phases[index] === phase)',
+                'previous.request.phases.every(phase => request.phases.includes(phase))',
+              ],
+              'whole-plan': ['      previous.request.phases.length > 0 &&\n', ''],
+              existence: [
+                "    requireThat(phases.every(phase => fullPlan.tasks.some(task => task.phase === phase)),\n" +
+                "      'selected prior phase does not exist in the frozen plan');\n",
+                '',
+              ],
+            }[guardMutation];
+            expect(runtime).toContain(guard);
+            writeFileSync(path, runtime.replace(guard, replacement));
+            const mutant = await import(pathToFileURL(path).href);
+            // Exercise the actual producer with one verifier guard removed, including its real proof export.
+            const result = await mutant.reconcileActivation(reconcileOptions);
+            const proof = mutant.selectionEvidence(await mutant.verifyReconciliationRequest(verifyOptions));
+            const mutatedRecords = [...records, source, result];
+            const mutatedContext = { ...selectionContext, reconciliations: [...proofs, proof] };
+            for (const select of [selectBuiltSdk, packaged.selectActivationRecord]) {
+              if (guardMutation === 'existence') {
+                // Readers trust supplied frozen-plan verification; only the verifier can check phase existence.
+                expect(select(mutatedRecords, f.registry, mutatedContext)?.id).toBe(result.id);
+              } else {
+                expect(() => select(mutatedRecords, f.registry, mutatedContext)).toThrow(/phase coverage/);
+              }
+            }
+            await expect(runCollectedChecker(f, mutatedRecords, { checker: packaged.main }))
+              .rejects.toThrow(/phase|coverage/);
+          }
+          expect(f.createIssue).toHaveBeenCalledTimes(creates);
+          expect([...f.issues.entries()]).toEqual(issueSnapshot);
+          break;
+        }
+        const verified = await verify();
+        const result = await reconcileActivation({
+          github: f.github, context: f.context, env: f.env, root: f.root,
+        });
+        proofs.push(selectionEvidence(await verify()));
+        records.push(source, result);
+        previous = { source, result };
+        validatedBindings += verified.bindings.length;
+        for (const select of [selectBuiltSdk, packaged.selectActivationRecord]) {
+          expect(select(records, f.registry, selectionContext)?.id).toBe(result.id);
+          expect(select([records[0], source, result], f.registry, {
+            ...selectionContext, reconciliations: [proofs.at(-1)],
+          })?.id).toBe(result.id);
+        }
+        expect(await runCollectedChecker(f, records, { checker: packaged.main }))
+          .toContain(`Validated ${validatedBindings} activation bindings.`);
+        expect(f.createIssue).toHaveBeenCalledTimes(creates);
+        expect([...f.issues.entries()]).toEqual(issueSnapshot);
+      }
+    },
+  );
+});
+
 describe('explicit current-state phase continuation', () => {
   it('continues after a later-phase pending-source recovery and validates the complete transitive reader chain', async () => {
     const f = phasedFixture();

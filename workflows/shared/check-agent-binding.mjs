@@ -963,7 +963,7 @@ export function selectActivationRecord(records, registryValue, context) {
     if (children.has(parentId)) fail('forked phase history');
     const before = parent.proof.phases ?? [];
     const after = node.proof.phases ?? [];
-    if (before.length === 0 || before.length >= after.length || !before.every(phase => after.includes(phase))) {
+    if (before.length === 0 || before.length >= after.length || !before.every((phase, index) => after[index] === phase)) {
       fail('phase coverage must strictly expand');
     }
     const current = new Map(node.selected.bindings.map(binding => [binding.task, binding]));

@@ -993,6 +993,18 @@ ${section('Activation evidence', {
         }
       });
 
+      it.each([
+        [[2], [1, 2]],
+        [[1, 3], [1, 2, 3]],
+      ])('rejects nonprefix insertion from %j to %j despite matching proofs', (before, after) => {
+        for (const sourceKind of ['activation', 'pending'] as const) {
+          const first = chainNode(1, before, undefined, { sourceKind });
+          const second = chainNode(2, after, first, { sourceKind });
+          rejectChain([first.source, first.record, second.source, second.record],
+            [first.evidence, second.evidence]);
+        }
+      });
+
       it('preserves numeric references but canonicalizes task and epic collision checks', () => {
         const parsedRegistry = parseAgentProvenanceRegistry(registry());
         const bindingContext = { repository: 'owner/repo', originIssue: 45, artifact: 'activated' as const };

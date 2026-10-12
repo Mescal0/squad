@@ -1286,6 +1286,8 @@ export async function verifyReconciliationRequest({
   const fullPlan = parseActivationPlan(planComment.body, planEnvelope.squad_artifact, registry, team, []);
   const plan = structuredClone(fullPlan);
   if (phases.length > 0) {
+    requireThat(phases.every(phase => fullPlan.tasks.some(task => task.phase === phase)),
+      'selected prior phase does not exist in the frozen plan');
     plan.tasks = plan.tasks.filter(task => phases.includes(task.phase));
     plan.epics = [...new Set(plan.tasks.map(task => task.epic))].filter(epic => epic !== 'origin');
     requireThat(plan.tasks.length > 0, 'selected prior phases contain no tasks');
@@ -1374,6 +1376,7 @@ export async function verifyReconciliationRequest({
       digest(previous.original.body) === predecessor.source_sha256 &&
       digest(previous.planComment.body) === digest(planComment.body) && digest(previous.registry) === digest(registry) &&
       Array.isArray(request.phases) && Array.isArray(previous.request.phases) &&
+      previous.request.phases.length > 0 &&
       previous.request.phases.length < request.phases.length &&
       previous.request.phases.every((phase, index) => request.phases[index] === phase) &&
       previous.snapshots.every(snapshot => snapshot.body === snapshot.after) &&
