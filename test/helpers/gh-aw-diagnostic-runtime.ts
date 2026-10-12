@@ -149,6 +149,7 @@ export function diagnosticRuntime(
     modules.set(name, module);
     const require = (request: string): any => {
       if (request.startsWith('.')) return load(posix.normalize(posix.join(posix.dirname(name), request)));
+      if (sources.has(request)) return load(request);
       if (request === 'fs' || request === 'node:fs') return filesystem;
       if (request === 'os' || request === 'node:os') return { ...requireNode(request), tmpdir: () => scratch };
       if (['path', 'node:path', 'crypto', 'node:crypto', 'util', 'node:util', 'vm', 'node:vm',

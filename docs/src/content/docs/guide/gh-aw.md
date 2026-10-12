@@ -1377,6 +1377,124 @@ To activate one phase at a time, use `/squad activate phase {N}`. The existing
 `/squad plan accept` and `/squad plan accept phase {N}` commands remain supported
 as legacy aliases with identical behavior.
 
+### Deterministic activation and no-create recovery
+
+The model submits only the exact plan-comment ID. A trusted job freezes the API
+comment and committed casting registry, validates the plan, and records a durable
+pending reservation **before any issue creation**. It receives actual issue IDs
+from the pinned synchronous runtime API. Only its finalizer can publish acceptance
+and Activated lifecycle output, after all operations, IDs, dependencies, owners
+and live labels validate. A green run or pending marker is not acceptance.
+Finalization and downstream verification also check current API parent links.
+A per-operation body-reference fallback is allowed only when recorded after the
+native parent write returned 404/422 and the parent read remains unavailable
+with 404/422. An available, contradictory parent always rejects the binding.
+
+Supported tables have unique stable `#`, `Title`, `Owner`, `Agent ID`, and
+`Depends On` columns. Granular implementation tables use `Agent` instead of
+`Owner` and additionally require `Epic`. Use comma-separated stable task IDs for
+dependencies, or `None`/`-`; use `### Phase N` headings for phases. Missing columns,
+unknown identities, duplicate IDs and cycles are rejected, not inferred.
+The applicable `max_issues` policy applies per invocation, with a hard ceiling
+of 50 including new epics. Issue identity never comes from a title match.
+
+If a runner fails after reserving or starting an operation, do not rerun creation
+to fill missing receipts. The API write might have succeeded. Partial output
+remains explicitly non-consumable. Run/attempt-qualified capture and receipt
+artifacts retain diagnostics, but their IDs/digests alone are **not historical
+producer attestation**. Missing authenticated historical receipts or frozen
+snapshots cannot be reconstructed from model logs.
+
+An eligible operator with write, maintain or admin permission may instead approve
+a **new current-state reconciliation**, under their existing repair authority.
+Post one request comment with this shape, then invoke
+`/squad reconcile activation <request-comment-id> <request-sha256>`:
+
+````markdown
+Activation reconciliation request:
+```json
+{
+  "schema": "squad-activation-reconciliation-request/v1",
+  "repository": "owner/repo",
+  "origin_issue": 42,
+  "original": {"comment_id": 200, "sha256": "<original-body-sha256>"},
+  "plan": {"comment_id": 100, "sha256": "<current-plan-body-sha256>"},
+  "registry": {"revision": 1, "sha256": "<registry-json-sha256>"},
+  "tasks": [
+    {"task": "1", "issue": 101, "temporary_id": "aw_wi1"},
+    {"task": "2", "issue": 102, "temporary_id": "aw_wi2"}
+  ],
+  "epics": []
+}
+```
+````
+
+All hashes are lowercase SHA-256: exact raw comment text for comments, and
+`JSON.stringify(registry)` for the registry. Supply every task and non-origin
+epic; use `temporary_id: null` when no token correction is needed. The model may
+not supply or widen these mappings. The writer verifies current API identities,
+hierarchy, labels, dependencies and the freshly frozen plan/registry.
+
+The only permitted issue-body correction replaces explicitly mapped backtick
+tokens in the single standalone `**Depends On:**` field. For example,
+``Task 1 (`aw_wi1`) — Prepare example inputs`` changes only its token to `#101`;
+the task label and trailing prose remain unchanged. Titles, scope, owners,
+labels, hierarchy and the original acceptance remain untouched. Before/after
+body hashes, fresh reads and post-write checks detect conflicts and make retries
+idempotent. **GitHub offers no atomic body compare-and-swap**: workflow concurrency
+serializes this origin's runs, but operators must avoid simultaneous external
+edits. An intervening edit or partial failure withholds reconciliation.
+
+Success creates immutable `activation-reconciled` output with
+`basis: current-state-authorized` and the original comment ID/hash. It makes no
+historical creation claim. The packaged checker and SDK selector require
+independently verified request evidence; actor flags or embedded hashes alone
+do not authorize selection. Malformed originals remain rejected by legacy readers.
+New readers skip one only after validating its explicit supplement, never by
+selecting the newest comment.
+
+The SDK accepts an explicitly supplied reconciliation chain only when every
+supplement has matching independent verifier evidence. It rejects forks,
+missing predecessors, cycles and changed prior mappings. A native continuation
+without its own reconciliation is not authenticated merely by passing it to the
+SDK: the packaged checker separately verifies its current API record, prior
+request evidence and unique history head. Standalone legacy parsing is not
+historical attestation.
+
+An interrupted run that created issues but never published acceptance may use
+`"source_kind": "pending"` in this same request. `original` must then identify the
+exact workflow-bot pending comment and body hash. Its repository, origin, frozen
+plan/registry hashes and complete phase coverage must match the newly authorized
+request. The reservation is only the source being superseded: it proves neither
+authority nor successful creation. Supply every existing numeric task/epic mapping;
+missing or partial maps cannot become full acceptance or authorize creation of
+missing work. The supplement records `supersedes_kind: "pending"`. A stale or
+forged reservation fails closed, as does incomplete current API evidence.
+
+For safe phase continuation, include ascending `"phases": [1, 2]` in a request
+covering **all previously activated phases** and their complete mappings. This
+must match the exact source artifact's phase coverage. After reconciliation,
+`/squad activate phase 3` creates only Phase 3 work, reusing validated prior
+issues and shared epics. Missing, stale or competing mappings fail closed for
+that invocation. Shared-epic labels use the full frozen plan's owner set, not
+just the currently selected phase.
+
+`/squad plan accept implementation phase N` keeps its combined acceptance and
+activation behavior through this same guarded writer, not a second create path.
+It requires the current scope acceptance and a frozen validation comment containing
+exactly one `RESULT: PASS`, the exact `**Implementation plan:**` comment URL and
+`**Implementation SHA-256:**` body hash, all sixteen passing rows in a
+`Check | Status | Details` table, and complete `Task | Size | Traces to` coverage
+with sizes XS/S/M/L. These inputs are rechecked during execution. Whole-plan
+implementation acceptance remains acceptance-only. Missing prior-phase mappings
+still require the explicit bridge above.
+
+Activation updates the existing lifecycle tracker only after validated acceptance.
+Intermediate phases show remaining work rather than terminal success. If acceptance
+was published but the lifecycle write failed, an identical activation rerun validates
+the existing record and repairs only the lifecycle; it does not duplicate issues
+or acceptance. Reconciliation similarly retries its lifecycle update idempotently.
+
 ### Granular lifecycle
 
 ```
@@ -1574,108 +1692,50 @@ After this, the plan is ready to activate.
 Creates GitHub issues from the accepted plan with Squad labels (`squad`,
 `squad:{agent-name}`), acceptance criteria, dependency references, and phase
 assignments. Flat plans create one child issue per planned task directly under
-the originating issue; they do not add a duplicate epic. Dependencies use native
-`blockedBy` edges when the installed safe-output tool supports them, otherwise
-they remain explicit `Depends On` references in each issue body.
+the originating issue; they do not add a duplicate epic. Dependencies are explicit
+numeric `Depends On` references in each issue body. This activation writer makes
+no native dependency-edge claim. Native parent links are requested; supported
+404/422 failures are recorded as body-reference fallbacks.
 
 #### Labels are created automatically
 
-You do not need to pre-create any label. Activation applies labels through the
-`add-labels` safe output, which is configured with `allowed: [squad, "squad:*"]`
-and `create-if-missing: true`, so `squad` and each `squad:{agent}` label is
-created the first time a run needs it. A fresh repository with zero Squad labels
-requires no manual label setup.
+You do not need to pre-create labels. The trusted writer looks up each permitted
+`squad`/roster-derived `squad:{agent}` label and creates missing names before
+issuing any issue create. It supplies the exact per-operation labels to the
+synchronous create API, then reads each actual issue's labels before accepting.
+Existing label descriptions and colors are untouched. Newly provisioned labels
+use color `9B8FCC` and an empty description.
 
-> **Two names, one operation.** `add-labels` (hyphenated) is the *configuration
-> key* in the workflow's `safe-outputs` block — that is the spelling to search for
-> in `squad.md` and the one the caps below apply to. `add_labels` (underscored) is
-> the *tool call* the agent makes at run time, and it is the spelling that appears
-> in activation summaries and incomplete reports. They refer to the same
-> operation; this page uses whichever form matches the surface being described.
-
-A label created this way receives gh-aw's deterministic color and an **empty
-description**. That is expected on a fresh repository, not a failure. Labels that
-already exist are left as they are, and re-applying a label on a rerun is a no-op.
-
-#### "Accepted" in an activation summary does not mean "applied"
-
-Activation summaries report **accepted operations**, and that word is exact.
-Issue creation and labeling are gh-aw *safe outputs*: during the agent's turn the
-run can only queue an operation against a target and observe that it was
-accepted. gh-aw applies the queued operations afterward, in a separate post-agent
-job. Nothing in the run reads labels back from GitHub.
-
-So a correct summary says a label operation was **accepted**. It must not claim a
-label was applied, landed, verified, confirmed, or checked on the issue.
-
-This vocabulary exists for a concrete reason. Labels do not ride along with issue
-creation: a label reaches an activated issue through exactly one route, an
-accepted `add_labels` operation targeting that issue. `create-issue`'s own
-`labels:` field never lands a label the activation run can claim, so it is never
-evidence that a label arrived. Labels therefore travel as separate `add_labels`
-calls, and "accepted" is the strongest thing the run can truthfully say about one.
-
-Practical consequence: an accepted summary is strong evidence, not proof. To
-confirm what actually landed, read the issues themselves:
-
-```bash
-gh issue list --label squad --json number,title,labels
-```
+The model's native `create_issue`/`add_labels` path is not used for activation.
+Queued calls or a successful issue create alone are not proof that labels landed:
+the finalizer checks their actual per-issue correspondence. Other command modes
+retain their native safe-output configuration.
 
 #### Activation is capped, and shortfalls are reported
 
-A single activation run is bounded. **The user-facing ceiling is 50 issues per
-activation run.** Plan for that number.
+A single activation invocation must fit its frozen planning-policy limit:
+default 20, lean 10, enterprise 50, or spike 5, subject to explicit supported
+overrides and a hard ceiling of 50. New epics count; validated reused epics do
+not. Oversized batches fail before creation, rather than silently truncating.
 
-The two underlying safe-output caps are set above that ceiling on purpose, so
-they are headroom rather than the limit you should size against:
-
-| Safe output | Cap | Derivation |
-|-------------|-----|------------|
-| `create-issue` | 75 | 50 worst-case issues plus 25 bounded margin |
-| `add-labels` | 110 | Covers both readings of the worst case — 50 calls (one per issue) and 100 label names (two each) |
-
-`max` counts safe-output **items (tool calls)**, not label names, and it is
-enforced at invocation and collection — neither enforcement fails the run.
-
-Two different shortfalls are checked separately, and they are not
-interchangeable — the trigger, the wording, and the remedy differ:
-
-| Shortfall | Trigger | What the report says |
-|-----------|---------|----------------------|
-| Issues not created | Created count is below the plan's declared total | `N of M issues created so far — rerun the identical activation command to continue.` |
-| Labels not applied | An activated issue had no `add_labels` call accepted | `{labeled} of {activated} activated issues had a label operation accepted` |
-
-Either one calls `report_incomplete`. With pinned gh-aw v0.91.5, **this fails the
-conclusion step** and records the reason in the Actions logs. The dispatcher
-does not create or update a separate tracking issue. Inspect the run and the
-guarded activation summary on the originating issue:
+If any create outcome is ambiguous, a label check fails, or a receipt is missing,
+the job fails and acceptance is withheld. The durable pending comment blocks
+recreation. Inspect the failure and use the explicitly authorized
+[no-create recovery contract](#deterministic-activation-and-no-create-recovery):
 
 ```bash
 gh run view <run-id> --log-failed
 ```
 
-If a cap was actually reached, the report names which cap and lists the work
-items that did not fit, and recommends `/squad plan activate phase {N}` to
-continue in smaller batches. A cap is named only when it was *observed* — the
-workflow forbids offering a cap as a guessed explanation, so an incomplete report
-will not always attribute the shortfall to one.
-
-Work items created in the same run are identified in that report by the temporary
-IDs the run minted — `#aw_epic{K}` and `#aw_task{N}` on the hierarchical path,
-`#aw_ph{N}` for a fast-path phase issue and `#aw_wi{N}` for a fast-path work item
-— rather than by issue number, because at that point creation is still deferred
-and no real number exists yet.
-
-Do not read a green run as proof of complete activation: an omitted
-`report_incomplete` signal cannot be detected by that handler. Check the
-activation summary and verify the resulting issues and labels.
+Do not retry an interrupted batch to fill missing issues, infer identity from
+titles, or manually repair acceptance. A green run is not consumer authority;
+use the validated binding record and current issue state.
 
 #### Verifying an activation: the bindings block
 
 Every phase and full activation artifact includes an `Activation bindings:`
-fenced JSON block — one entry per created or recognized task, built only from
-accepted operations. This is the most directly checkable surface Squad emits: a
+fenced JSON block — one entry per created or explicitly mapped task, built from
+actual IDs and validated frozen assignments. This is the most directly checkable surface Squad emits: a
 deterministic post-activation checker compares those bindings against the labels
 actually present on the issues.
 
@@ -1697,11 +1757,13 @@ gh issue list --label squad --json number,title,labels
 A binding whose `label` does not match the labels actually on that issue is the
 discrepancy the checker exists to catch.
 
-Where an owner did not become a `squad:{agent}` label — a multi-owner epic, or an
-owner matching no roster name — the summary carries a required `Non-roster agent
-values` heading naming the value and the issue, and the matching binding records
-an omission reason. An omission is always reported explicitly, never left for you
-to infer.
+Multi-owner epics carry base `squad` plus explicit `multi-owner` omission metadata
+instead of a fabricated sole-owner label. The retained `Non-roster agent values`
+section names each affected epic and its owners, explaining that omission.
+Non-roster plan owners fail before
+creation; the supported external `@copilot` owner carries explicit identity
+omission metadata and `squad:copilot`. Missing expected labels cannot be converted
+into an omission to obtain acceptance.
 
 ### Incremental phase acceptance
 
@@ -1713,14 +1775,15 @@ phase at a time:
 ```
 
 This accepts Phase 1 **and automatically creates its GitHub issues** in a single
-step. After completing Phase 1 work, continue with:
+step. Before continuing, reconcile the complete prior-phase mapping against the
+same frozen plan and registry as described above. Then continue with:
 
 ```
 /squad plan accept implementation phase 2
 ```
 
 The accept command automatically activates the phase (creates issues) when all
-prior phases are already activated. This means you don't need a separate
+prior phases have a validated explicit mapping bridge. This means you don't need a separate
 `/squad plan activate phase N` command in the common case — accept does it all.
 
 If you need to activate a phase separately (e.g., you accepted it earlier but
@@ -1735,12 +1798,13 @@ skipped auto-activation), use:
 - Phases must be activated in order (Phase 2 requires Phase 1 to be activated first)
 - Accept automatically activates when prior phases are ready (no separate activate needed)
 - Each acceptance/activation posts a summary showing created issues and remaining phases
-- Dependencies in later phases automatically reference issue numbers from earlier phases
+- Dependencies in later phases use the explicit validated prior-phase numeric mappings
 - `/squad plan accept implementation` with no phase arg still accepts everything (backward compatible)
 - `/squad plan activate` with no phase arg still activates everything (backward compatible)
 - The same pattern works for the legacy fast path: `/squad plan accept phase {N}`
 
-This is useful for large projects where you want to review and iterate between phases — ship Phase 1, learn from it, then decide whether to adjust Phase 2's plan before accepting it.
+This supports bounded sequential delivery. A changed plan or registry invalidates
+the existing bridge; do not silently reuse its old mapping against new inputs.
 
 ### Plan revise
 

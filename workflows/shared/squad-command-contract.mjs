@@ -78,6 +78,7 @@ export const VALID_COMMANDS = Object.freeze([
   '/squad plan accept implementation [phase N]',
   '/squad plan activate [phase N]',
   '/squad implement',
+  '/squad reconcile activation <request-comment-id> <request-sha256>',
 ]);
 
 function normalizeNewlines(value) {
@@ -169,6 +170,10 @@ function classifyArgument(argumentText) {
 
   const normalized = argumentText.replace(/[ \t]+/g, ' ').trim();
   const lowered = normalized.toLowerCase();
+
+  if (/^reconcile activation [1-9]\d* [a-f0-9]{64}$/.test(normalized)) {
+    return accepted('reconcile activation', normalized);
+  }
 
   const exact = NO_ARGUMENT_COMMANDS.get(lowered);
   if (exact) return accepted(exact, normalized);
@@ -437,6 +442,43 @@ export async function enforceSquadCommandContract({
     await authorizeSquadCommand({ payload, eventName, actor, resolvePermission, result });
     const items = readOutputItems(agentOutputPath);
     if (!commandRequiresAuthorization(result)) validateOpenModeOutputs(result, payload, items);
+    const activationArtifacts = new Set(['plan-accepted', 'phases-accepted', 'activated', 'phases-activated', 'activation-reconciled']);
+    for (const item of items) {
+      if (!item || typeof item !== 'object') throw new Error('Squad output item is malformed.');
+      const body = typeof item.body === 'string' ? item.body.replace(/<!--[\s\S]*?-->/g, '') : '';
+      const envelopes = [...body.matchAll(/Structured data:\s*```json\s*([\s\S]*?)```/gi)];
+      if (activationArtifacts.has(item.data?.squad_artifact) ||
+          /Activation (?:bindings|reconciliation):/i.test(body) ||
+          /squad-activation-(?:pending|finalization)\/v1/.test(body) ||
+          (item.type === 'upsert_lifecycle_state' &&
+            (/^(?:[-*]\s+)?\*\*(?:Current state|State):\*\*\s+Activated\s*$/im.test(body) ||
+             /^(?:[-*]\s+)?(?:\*\*)?Activation:(?:\*\*)?\s+(?:✅\s+)?Done\b/im.test(body) ||
+             /^\|\s*Activat(?:e|ion|ed)\s*\|\s*✅\s+Done\b/im.test(body))) ||
+          envelopes.some(match => {
+            try { return activationArtifacts.has(JSON.parse(match[1])?.squad_artifact); }
+            catch { return true; }
+          }) ||
+          (result.mode.startsWith('plan') && item.type === 'create_issue')) {
+        throw new Error('Activation acceptance, bindings and terminal lifecycle belong exclusively to the trusted writer.');
+      }
+    }
+    if (['activate', 'plan accept', 'plan activate'].includes(result.mode) ||
+        (result.mode === 'plan accept implementation' && result.phase !== null)) {
+      if (items.length !== 1 || items[0]?.type !== 'activate_plan' ||
+          typeof items[0].plan_comment_id !== 'string' ||
+          !/^[1-9]\d*$/.test(items[0].plan_comment_id) ||
+          !Number.isSafeInteger(Number(items[0].plan_comment_id)) ||
+          Object.keys(items[0]).some(key => !['type', 'plan_comment_id'].includes(key))) {
+        throw new Error('Activation requires one activate_plan request with plan_comment_id; native issue creation and model acceptance/lifecycle outputs are forbidden.');
+      }
+    }
+    if (result.mode === 'reconcile activation') {
+      if (items.length !== 1 || items[0]?.type !== 'reconcile_activation' ||
+          items[0].action !== 'reconcile' ||
+          Object.keys(items[0]).some(key => !['type', 'action'].includes(key))) {
+        throw new Error('Reconciliation requires exactly one reconcile_activation request with no model-supplied mappings.');
+      }
+    }
     return result;
   }
   if (result.status === 'none') throw new Error('No explicit Squad command; refusing all safe outputs.');

@@ -1,0 +1,23 @@
+---
+"@bradygaster/squad-sdk": patch
+---
+
+Validate real numeric task and epic issue references and add an explicit activation
+reader for independently verified current-state-authorized reconciliations.
+Preserve valid legacy activation records while rejecting ambiguous, malformed,
+or unverified replacements without rewriting historical acceptance.
+Require exactly one matching verifier evidence record and bind any selected
+phase scope to its canonical, independently verified phase IDs.
+Allow a verifier-supplied full frozen-plan assignment context to validate complete
+epic identity sets across phase subsets; retain strict exact-row validation when
+that independent context is absent.
+Normalize verifier and producer display names consistently with trim/lowercase
+while retaining exact stable agent identity checks.
+Reject task issues that collide with the origin or any epic issue, and prevent
+non-origin epics from reusing the origin issue.
+Support explicit verifier-authorized pending-source reconciliation with matching
+capture metadata, frozen plan and registry digests, and phase scope. Pending
+reservations and their prior references never authorize activation on their own.
+Select complete transitive phase histories only when every reconciliation has an
+independent verifier proof and exact source links form one fully consumed chain
+with consistent frozen snapshots, expanding phases, and preserved prior mappings.
