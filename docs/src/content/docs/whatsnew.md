@@ -4,7 +4,7 @@ Full release history for Squad — from beta through the v1 TypeScript replatfor
 
 ---
 
-## v1.0.2 — Current Release
+## v1.1.0 — Current Release
 
 - **Smarter model routing** — Central model resolution, GA quality profiles, and safer economy fallbacks make model selection predictable and observable
 - **HydraFusion opt-in** — Preview HydraFusion models are available through an explicit profile without entering default or GA recommendation chains
