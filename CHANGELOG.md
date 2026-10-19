@@ -4,8 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-10-19
+
 ### Added
 
+- Add a central, provenance-aware model resolver with explicit precedence across user, config, session, charter, task, and default sources; forward-only availability and cost-policy fallback; platform-default omission; lifecycle telemetry; and stable SDK exports (#1720).
+- Add GA-backed `quality-first`, `balanced`, and `economy` model profiles with task-aware tier selection, persistent configuration, live-model availability handling, and updated public catalog/fallback chains (#1598).
+- Add opt-in HydraFusion model support and a `hydrafusion` quality profile while keeping preview models out of default chains and GA recommendations; unavailable HydraFusion selections fall forward safely within the active cost ceiling (#2014).
+- Implement persisted `squad cast --name <name> --role <role>` and `squad hire`, live rebuilds for `squad build --watch`, and an explicit unsupported-provider error for `squad memory provider --provider copilot` (#2191, #2192, #2193).
 - Add the draft `squad-charter/v0.1` artifact profile, explicit conformance profile selection, validation-before-runtime compilation, typed diagnostics, operation-exact capability metadata, canonical and lossless extension-preserving serialization, a schema-defined language-neutral conformance manifest, and implementation-independent specification documents (#2069, #2074).
 - Add atomic repository-scoped `createIfAbsent` operation across all state backends (`local`, `git-notes`, `orphan-branch`, `two-layer`), `StorageProvider` implementations, `StateBackendStorageAdapter`, and the `squad_state_create_if_absent` MCP tool with `StateKeyConflictError` and `StateBackendUncertaintyError` (#1947).
 - Persist runtime turn starts and usage events to a backend-aware JSONL ledger, report telemetry coverage, and make `squad cost` prefer structured telemetry before falling back to self-reported orchestration logs (#1716, #2063).
@@ -13,6 +19,8 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Allow automatic economy-profile resolutions to continue into available cheaper tiers after exhausting the initially selected tier.
+- Update `squad economy` status examples to use the current economy substitution model IDs.
 - Align native Squad workflow installation and bundled enlistment guidance with the exact `gh-aw` `v0.91.5` compiler, preserving strict package ownership and integrity verification, supporting an explicit schedule seed, verifying 24-hour failure-report retention digests, and binding activation App tokens to the full current repository identity (#2195).
 - Make `issue-assign` the sole Copilot assignment workflow, fail visibly on missing tokens or unconfirmed API responses, dispatch automated auto-assign handoffs explicitly, and disclose deterministic keyword triage provenance (#2156).
 - Clarify Ralph's monitor-only role and reserve pull request merging for humans in the distributed reference templates (#2156).
@@ -21,6 +29,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Preserve user-authored `.github/copilot-instructions.md` content during `squad init`, `squad upgrade`, and `squad copilot` by updating only the Squad-managed marker block (#2186, #2221).
+- Spill multiline and oversized Windows `squad watch --execute` prompts to temporary Markdown files so `cmd.exe` cannot truncate them at the first newline, and report dispatched issue counts in round summaries (#2070).
 - Automatically migrate supported unversioned casting state before upgrading managed files (including already-current upgrades), support historical `assigned_at` casting timestamps with conflict detection and preserved original dates, archive original registry/history bytes without overwriting, and fail closed on unsupported or inconsistent state (#2190).
 - Keep standalone `squad_state` MCP commands portable in shared project configuration while retaining machine-local launch resolution, and preserve existing destination newline style when upgrading managed text files and refreshing coordinator capabilities (#2190).
 - Validate real numeric task and epic issue references and add an explicit activation reader for independently verified current-state-authorized reconciliations, preserving valid legacy activation records while rejecting ambiguous, malformed, or unverified replacements.

@@ -229,7 +229,7 @@ jobs:
 
   promote-latest:
     name: Promote complete stable release to latest
-    needs: [release, standalone]
+    needs: [release, npm, standalone]
     if: needs.release.outputs.created == 'true' && needs.release.outputs.stable_release == 'true'
     runs-on: ubuntu-latest
     permissions:
