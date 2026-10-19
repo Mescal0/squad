@@ -233,7 +233,7 @@ describe('standalone release handoff', () => {
 describe('stable promotion', () => {
   it('promotes directly from dev to main through a validated sanitized merge', () => {
     expect(existsSync(join(WORKFLOWS, 'squad-preview.yml'))).toBe(false);
-    expect(Object.keys(promoteWorkflow.jobs)).toEqual(['dev-to-main']);
+    expect(Object.keys(promoteWorkflow.jobs)).toEqual(['open-existing-promotion', 'dev-to-main']);
 
     const promotion = serialized(promoteWorkflow.jobs['dev-to-main']);
     expect(promotion).toContain(
@@ -260,6 +260,39 @@ describe('stable promotion', () => {
       actions: 'write',
       contents: 'write',
     });
+  });
+
+  it('can open a validated in-repository promotion branch as a bot-authored PR', () => {
+    expect(promoteWorkflow.on?.workflow_dispatch?.inputs?.promotion_branch).toMatchObject({
+      required: false,
+      default: '',
+      type: 'string',
+    });
+
+    const botPromotion = promoteWorkflow.jobs['open-existing-promotion'];
+    expect(botPromotion.if).toBe("${{ inputs.promotion_branch != '' }}");
+    expect(botPromotion.permissions).toEqual({
+      contents: 'read',
+      'pull-requests': 'write',
+    });
+    expect(promoteWorkflow.jobs['dev-to-main'].if).toBe("${{ inputs.promotion_branch == '' }}");
+
+    const promotion = serialized(botPromotion);
+    expect(promotion).toContain(
+      'Promotion branch must match chore/promote-X.Y.Z or chore/promote-vX.Y.Z',
+    );
+    expect(promotion).toContain('git merge-base --is-ancestor origin/main HEAD');
+    expect(promotion).toContain("git ls-files '.changeset/*.md'");
+    expect(promotion).toContain('CLI SDK dependency floors must both be');
+    expect(promotion).toContain('SKIP_BUILD_BUMP');
+    expect(promotion).toContain('node --test test/*.test.cjs');
+    expect(promotion).toContain('Build or tests modified the promotion branch');
+    expect(promotion).toContain('gh pr create');
+    expect(promotion).toContain('--base main');
+    expect(promotion).toContain('--head');
+    expect(promotion).toContain('${BRANCH}');
+    expect(promotion).toContain('created with');
+    expect(promotion).toContain('GITHUB_TOKEN');
   });
 });
 
