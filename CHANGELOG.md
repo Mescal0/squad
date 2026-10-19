@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [1.0.2] - 2026-10-19
+## [1.1.0] - 2026-10-19
 
 ### Added
 
@@ -19,6 +19,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Add a human-triggered protected-main promotion mode that validates an existing sanitized release branch and opens a bot-authored pull request for independent maintainer approval.
 - Allow automatic economy-profile resolutions to continue into available cheaper tiers after exhausting the initially selected tier.
 - Update `squad economy` status examples to use the current economy substitution model IDs.
 - Align native Squad workflow installation and bundled enlistment guidance with the exact `gh-aw` `v0.91.5` compiler, preserving strict package ownership and integrity verification, supporting an explicit schedule seed, verifying 24-hour failure-report retention digests, and binding activation App tokens to the full current repository identity (#2195).
