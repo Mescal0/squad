@@ -20,6 +20,7 @@ import { projectSquadStateMcpSpec, resolveSquadStateMcpSpec, type SquadStateMcpS
 import { copyManagedFile, syncCopilotInstructionsFile, writeManagedText } from './managed-file.js';
 export { resolveSquadStateMcpSpec } from './mcp-spec.js';
 import { ensureSquadStateMcpInRoot, tombstoneStaleSquadStateInProjectMcp } from './mcp-root.js';
+import { applyClientProjectionsForUpgrade, reportClientResults, type ClientId } from './clients.js';
 
 const storage = new FSStorageProvider();
 
@@ -155,6 +156,8 @@ export interface UpgradeOptions {
   insider?: boolean;
   /** Preview what upgrade would change without writing. */
   dryRun?: boolean;
+  /** Add these client hosts to the configured set; configured clients are always refreshed. */
+  clients?: ClientId[];
 }
 
 export interface UpdateInfo {
@@ -1195,6 +1198,21 @@ export function ensureUserOwnedTemplates(dest: string, templatesDir: string): st
   return created;
 }
 
+/** Refresh configured (plus any newly requested) client projections. */
+async function refreshClients(dest: string, squadDir: string, options: UpgradeOptions, filesUpdated: string[]): Promise<void> {
+  try {
+    const synced = await applyClientProjectionsForUpgrade(dest, squadDir, {
+      clients: options.clients,
+      warn: (m) => warn(m.replace(/^⚠\s*/, '')),
+    });
+    if (synced.clients.length === 0) return;
+    reportClientResults(synced.results, (m) => (m.startsWith('⚠') ? warn(m.slice(2)) : success(m.slice(2))));
+    filesUpdated.push(`clients (${synced.clients.join(', ')})`);
+  } catch (err) {
+    warn(`Could not refresh client files: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 /**
  * Run the upgrade command
  */
@@ -1254,6 +1272,16 @@ export async function runUpgrade(dest: string, options: UpgradeOptions = {}): Pr
         console.log(`  ${exists ? 'overwrite' : 'create'}  ${file.destination}`);
       }
     }
+    try {
+      const planned = await applyClientProjectionsForUpgrade(dest, squadDirInfo.path, {
+        clients: options.clients,
+        dryRun: true,
+        warn: (m) => warn(m.replace(/^⚠\s*/, '')),
+      });
+      if (planned.clients.length > 0) info(`Would project client host files for: ${planned.clients.join(', ')}`);
+    } catch (err) {
+      warn(`Could not plan client files: ${err instanceof Error ? err.message : String(err)}`);
+    }
     console.log(`\nRun without --dry-run to apply.\n`);
     return { fromVersion: oldVersion, toVersion: cliVersion, filesUpdated: [], migrationsRun: [] };
   }
@@ -1293,6 +1321,7 @@ export async function runUpgrade(dest: string, options: UpgradeOptions = {}): Pr
 
     // Run infrastructure ensure checks even when already current
     await runEnsureChecks(dest, templatesDir, filesUpdated);
+    await refreshClients(dest, squadDirInfo.path, options, filesUpdated);
 
     return {
       fromVersion: oldVersion,
@@ -1378,6 +1407,7 @@ export async function runUpgrade(dest: string, options: UpgradeOptions = {}): Pr
 
   // Run infrastructure ensure checks
   await runEnsureChecks(dest, templatesDir, filesUpdated);
+  await refreshClients(dest, squadDirInfo.path, options, filesUpdated);
 
   console.log();
   info(`Upgrade complete: v${fromLabel} → v${cliVersion}`);
