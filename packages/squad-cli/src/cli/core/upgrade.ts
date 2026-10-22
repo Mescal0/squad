@@ -8,7 +8,13 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { FSStorageProvider, stripTeamCapabilitiesBlock, syncTeamCapabilities } from '@bradygaster/squad-sdk';
-import { ensureCastingRegistryPair, preflightCastingRegistryPair } from '@bradygaster/squad-sdk/casting';
+import {
+  backfillCastingRegistryFromTeam,
+  ensureCastingRegistryPair,
+  preflightCastingRegistryPair,
+  repairHandwrittenCastingRegistry,
+  type RepairResult,
+} from '@bradygaster/squad-sdk/casting';
 import { success, warn, info, dim, bold } from './output.js';
 import { fatal } from './errors.js';
 import { detectSquadDir } from './detect-squad-dir.js';
@@ -652,6 +658,15 @@ export function ensureCastingDefaults(dest: string, templatesDir?: string): stri
   const created: string[] = [];
   try {
     storage.mkdirSync(castingDir, { recursive: true });
+    // LLM-handwritten registries (role keys, agents arrays, no schema) are normalized instead of crashing upgrade;
+    // the repair itself decides whether existing history.json content blocks it
+    const repair = repairHandwrittenCastingRegistry(castingDir);
+    if (repair.repaired) {
+      warn('Normalized a handwritten .squad/casting/registry.json');
+      created.push(...repair.files.map((f) => `.squad/casting/${f}`));
+    } else {
+      warnCastingRepairSkipped('Could not normalize handwritten .squad/casting/registry.json', repair);
+    }
     const pair = ensureCastingRegistryPair(
       castingDir,
       templateContent(
@@ -666,6 +681,14 @@ export function ensureCastingDefaults(dest: string, templatesDir?: string): stri
     );
     if (pair.created) {
       created.push('.squad/casting/registry.json', '.squad/casting/history.json');
+    }
+    // team.md + charters written directly by a model on an older CLI leave the registry empty: backfill it from the roster
+    const backfill = backfillCastingRegistryFromTeam(castingDir, path.join(dest, '.squad', 'team.md'));
+    if (backfill.repaired) {
+      warn('Backfilled .squad/casting/registry.json from .squad/team.md');
+      created.push(...backfill.files.map((f) => `.squad/casting/${f}`).filter((f) => !created.includes(f)));
+    } else {
+      warnCastingRepairSkipped('Could not backfill .squad/casting/registry.json from .squad/team.md', backfill);
     }
 
     const policyPath = path.join(castingDir, 'policy.json');
@@ -1213,6 +1236,15 @@ async function refreshClients(dest: string, squadDir: string, options: UpgradeOp
   }
 }
 
+/** Surface why a handwritten-registry repair or team.md backfill declined to act, including per-entry drops. */
+function warnCastingRepairSkipped(headline: string, result: RepairResult): void {
+  if (result.repaired || !result.reason) return;
+  warn(`${headline}: ${result.reason}`);
+  for (const { name, reason } of result.dropped ?? []) {
+    dim(`    - ${name}: ${reason}`);
+  }
+}
+
 /**
  * Run the upgrade command
  */
@@ -1245,12 +1277,27 @@ export async function runUpgrade(dest: string, options: UpgradeOptions = {}): Pr
 
   const projectType = detectProjectType(dest);
 
-  const castingMigrated = preflightCastingRegistryPair(
-    path.join(squadDirInfo.path, 'casting'),
-    options.dryRun ?? false,
-  );
+  // A handwritten registry (model wrote registry.json itself over the empty init pair) is repaired BEFORE the
+  // strict preflight, which would otherwise reject it and make the repair in ensureCastingDefaults unreachable.
+  // The repair reconciles a single Init Mode history snapshot; registries with real history keep failing closed.
+  const castingDir = path.join(squadDirInfo.path, 'casting');
+  const dryRun = options.dryRun ?? false;
+  const repair = repairHandwrittenCastingRegistry(castingDir, { dryRun });
+  const handwrittenRepaired = repair.repaired;
+  if (handwrittenRepaired) {
+    if (dryRun) {
+      info('Would normalize handwritten .squad/casting/registry.json to a managed registry/history pair.');
+    } else {
+      warn('Normalized a handwritten .squad/casting/registry.json');
+    }
+  } else {
+    warnCastingRepairSkipped('Could not normalize handwritten .squad/casting/registry.json', repair);
+  }
+  const castingMigrated = handwrittenRepaired && dryRun
+    ? false
+    : preflightCastingRegistryPair(castingDir, dryRun);
   if (castingMigrated) {
-    info(options.dryRun
+    info(dryRun
       ? 'Would migrate legacy casting state to a managed registry/history pair.'
       : 'Migrated legacy casting state to a managed registry/history pair.');
   }
@@ -1258,6 +1305,12 @@ export async function runUpgrade(dest: string, options: UpgradeOptions = {}): Pr
   // --dry-run: preview what upgrade would do without writing (#1052)
   if (options.dryRun) {
     info(`\n${bold('Dry run')} — previewing upgrade from ${oldVersion || 'unknown'} → ${cliVersion}\n`);
+    const backfill = backfillCastingRegistryFromTeam(castingDir, path.join(squadDirInfo.path, 'team.md'), { dryRun: true });
+    if (backfill.repaired) {
+      info('Would backfill .squad/casting/registry.json from .squad/team.md');
+    } else {
+      warnCastingRepairSkipped('Would not backfill .squad/casting/registry.json from .squad/team.md', backfill);
+    }
     const templatesDir = getTemplatesDir();
     const agentSrc = path.join(templatesDir, 'squad.agent.md.template');
     if (storage.existsSync(agentSrc)) {
