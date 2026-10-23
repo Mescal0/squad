@@ -113,6 +113,16 @@ uninstallClients(['claude', 'cursor', 'codex'], {
 
 Then remove the corresponding slug(s) from `clients` in `.squad/config.json`.
 
+### Removed in 2.0
+
+Squad 2.0 removes some 1.x features outright; the single record of what was removed is the **BREAKING** row in [What's New → Breaking & Behavior Changes (v2.0.0)](../whatsnew.md#breaking--behavior-changes-v200). There is no migration tool for removed features. Squad now resolves a team only from the project `.squad/` (current directory and parents): outside a project, `squad status`, `squad doctor`, `squad cast` and `squad cost` exit with `No squad in this directory. Run "squad init" first.`
+
+`squad upgrade` removes an obsolete `teamRoot` setting that older versions could leave in `.squad/config.json` pointing outside the project (one line: `Removed obsolete "teamRoot" setting from .squad/config.json.`); a `teamRoot` that points at another repository (dual-root mode) is left alone. `squad upgrade` also no longer treats its own version stamps in `squad.agent.md` as a local customization, so an existing `squad.agent.md.local-backup` survives repeated upgrades.
+
+### Downgrading and old CLIs
+
+Squad does not support downgrading in place. Older CLIs have no "newer workspace" guard — a 0.9.x or 1.x `squad upgrade` run against a 2.0 workspace will rewrite Squad-owned files to its own templates without warning, and on 0.9.1 `squad upgrade --dry-run` still writes. To go back, restore `.github/agents/squad.agent.md`, `.github/workflows/squad-*.yml` and `.squad/` from version control, then install the older CLI. Keep the CLI version pinned per repository (`npx @bradygaster/squad-cli@<version>`) when several people work on the same workspace.
+
 ---
 
 ## Migrations
