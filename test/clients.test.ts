@@ -270,6 +270,45 @@ describe('coordinator behavioral-contract parity', () => {
   });
 });
 
+/**
+ * Host feature matrix (test-fixtures/spec/suite-v0.2/host-feature-matrix.json): the projected digest is the only
+ * coordinator text non-Copilot hosts load by default. These assertions pin what the live runs on Claude Code and
+ * OpenCode proved the digest carries, and record (as one `it.fails` per host and gap) the canonical sections it
+ * still lacks. When the stack adds one of those sections for a host, that host's `it.fails` turns red: drop
+ * `.fails` for it and flip the matrix cell's capability from `unsupported` to `supported`. The matrix's `expectedFailures[].test`
+ * is the title below without the ` [<host>]` suffix; `test/squad-20-host-feature-matrix.test.ts` checks both.
+ */
+describe('coordinator digest vs. host feature matrix', () => {
+  const sections: Array<[string, RegExp[]]> = [
+    ['Dispatch adapter per host', [/## Dispatch adapter: /, /## Transport/]],
+    ['Host-prefixed tool names (Claude, OpenCode, Kiro)', [/mcp__squad_state__squad_state_read/, /squad_state_squad_state_read/, /@squad_state\/squad_state_read/]],
+    ['Worktree + issue-lifecycle references', [/worktree-reference\.md/, /issue-lifecycle\.md/]],
+    ['Canonical file is authoritative when present', [/\.github\/agents\/squad\.agent\.md/, /authoritative coordinator contract/]],
+  ];
+  for (const id of CLIENT_IDS) {
+    it(`${id} digest carries the host-specific sections the live runs relied on`, () => {
+      const text = buildCoordinatorInstructions(id);
+      for (const [name, pats] of sections) for (const p of pats) expect(text, `${id}: ${name} ${p}`).toMatch(p);
+    });
+  }
+
+  const gaps: Array<[string, RegExp, string]> = [
+    ['team-root resolution (teamRoot / stateLocation / TEAM_ROOT)', /teamRoot|stateLocation|TEAM_ROOT/, 'monorepo-team-root, dual-root-remote-mode'],
+    ['upstream inheritance (upstream.json)', /upstream\.json/, 'upstream-inheritance (F1)'],
+    ['Azure DevOps issue tracking (az boards / ADO)', /az boards|Azure DevOps/, 'azure-devops (F3)'],
+    ['GitLab issue tracking (glab)', /glab|GitLab/, 'gitlab-issues (F2)'],
+    ['per-agent model / reasoning / context-tier selection', /reasoning[- ]effort|context[- ]tier|defaultModel/, 'model-selection'],
+    ['plugin marketplace browse on cast', /marketplace/, 'marketplace-plugins'],
+  ];
+  for (const [name, pat, cells] of gaps) {
+    for (const id of CLIENT_IDS) {
+      it.fails(`digest gap (expected until the stack adds it): ${name} [${id}]`, () => {
+        expect(buildCoordinatorInstructions(id), `${id}: ${name} (matrix cells: ${cells})`).toMatch(pat);
+      });
+    }
+  }
+});
+
 describe('copilot adapter', () => {
   it('projects only .mcp.json with squad_state', () => {
     installClients(['copilot'], ctx());
