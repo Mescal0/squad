@@ -12,6 +12,7 @@ import { clearResolveSquadCache, isRetiredProfileTeamRoot } from '@bradygaster/s
 import {
   backfillCastingRegistryFromTeam,
   ensureCastingRegistryPair,
+  normalizeCastingJsonLineEndings as normalizeCastingJsonFiles,
   preflightCastingRegistryPair,
   repairHandwrittenCastingRegistry,
   type RepairResult,
@@ -678,6 +679,7 @@ const GITATTRIBUTES_RULES = [
   '.squad/agents/*/history.md merge=union',
   '.squad/log/** merge=union',
   '.squad/orchestration-log/** merge=union',
+  '.squad/casting/*.json text eol=lf',
 ];
 
 const GITIGNORE_ENTRIES = [
@@ -740,13 +742,19 @@ export function ensureGitattributes(dest: string, options: { dryRun?: boolean } 
       appendLinesPreservingEol(filePath, added);
     } catch (err: unknown) {
       if (err instanceof Error && 'code' in err && ['EPERM', 'EACCES'].includes((err as NodeJS.ErrnoException).code ?? '')) {
-        warn('Could not update .gitattributes (read-only). Add merge=union entries manually.');
+        warn('Could not update .gitattributes (read-only). Add the required Squad entries manually.');
         return [];
       }
       throw err;
     }
   }
   return added;
+}
+
+export function normalizeCastingJsonLineEndings(dest: string): string[] {
+  const castingDir = path.join(dest, '.squad', 'casting');
+  return normalizeCastingJsonFiles(castingDir)
+    .map(name => `.squad/casting/${name}`);
 }
 
 /**
@@ -1172,6 +1180,11 @@ async function runEnsureChecks(dest: string, templatesDir: string, filesUpdated:
   if (castingFiles.length > 0) {
     success(`scaffolded ${castingFiles.length} default casting files`);
     filesUpdated.push(...castingFiles);
+  }
+  const normalizedCasting = normalizeCastingJsonLineEndings(dest);
+  if (normalizedCasting.length > 0) {
+    success(`normalized ${normalizedCasting.length} casting JSON file(s) to LF`);
+    filesUpdated.push(...normalizedCasting);
   }
 
   const memoryFiles = ensureMemoryGovernanceUpgradeDefaults(dest);

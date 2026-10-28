@@ -60,6 +60,10 @@ export type CastingDurabilityBoundary =
   | 'registry:file-fsync'
   | 'registry:rename'
   | 'registry:parent-fsync'
+  | 'normalization:write'
+  | 'normalization:file-fsync'
+  | 'normalization:rename'
+  | 'normalization:parent-fsync'
   | 'cleanup:journal-unlink'
   | 'cleanup:journal-parent-fsync'
   | 'cleanup:payload-remove'
@@ -226,7 +230,7 @@ function writeDurableFile(
 function durableReplace(
   filePath: string,
   content: string,
-  stage: 'journal' | 'history' | 'manifest' | 'registry',
+  stage: 'journal' | 'history' | 'manifest' | 'registry' | 'normalization',
   transactionId: string,
 ): void {
   const tempPath = `${filePath}.tmp-${transactionId}-${randomUUID()}`;
@@ -251,6 +255,12 @@ function sha256(content: string | undefined): string | null {
   return content === undefined
     ? null
     : createHash('sha256').update(content, 'utf8').digest('hex');
+}
+
+/** Treat Git's CRLF worktree conversion as byte-equivalent to canonical LF JSON. */
+function matchesSha256(content: string | undefined, expected: string | null): boolean {
+  if (sha256(content) === expected) return true;
+  return content !== undefined && sha256(content.replace(/\r\n/g, '\n')) === expected;
 }
 
 function parseObject(raw: string | undefined, label: string): Record<string, unknown> | undefined {
@@ -1127,9 +1137,8 @@ function expectedState(
   nextHash: string,
   label: string,
 ): 'previous' | 'next' {
-  const actual = sha256(raw);
-  if (actual === previousHash) return 'previous';
-  if (actual === nextHash) return 'next';
+  if (matchesSha256(raw, previousHash)) return 'previous';
+  if (matchesSha256(raw, nextHash)) return 'next';
   throw new Error(`Cannot recover casting transaction: ${label} changed outside the journal`);
 }
 
@@ -1184,8 +1193,8 @@ export function recoverCastingRegistryTransaction(castingDir: string): void {
   if (
     nextRegistryRaw === undefined
     || nextHistoryRaw === undefined
-    || sha256(nextRegistryRaw) !== journal.registry.next_sha256
-    || sha256(nextHistoryRaw) !== journal.history.next_sha256
+    || !matchesSha256(nextRegistryRaw, journal.registry.next_sha256)
+    || !matchesSha256(nextHistoryRaw, journal.history.next_sha256)
   ) {
     throw new Error('Cannot recover casting transaction: durable payload is missing or corrupt');
   }
@@ -1197,7 +1206,7 @@ export function recoverCastingRegistryTransaction(castingDir: string): void {
     history_sha256: journal.history.next_sha256,
   };
   const nextManifestRaw = JSON.stringify(nextManifest, null, 2) + '\n';
-  if (sha256(nextManifestRaw) !== journal.manifest.next_sha256) {
+  if (!matchesSha256(nextManifestRaw, journal.manifest.next_sha256)) {
     throw new Error('Cannot recover casting transaction: manifest hash is corrupt');
   }
 
@@ -1726,6 +1735,40 @@ export function preflightCastingRegistryPair(castingDir: string, dryRun = false)
 }
 
 /**
+ * Normalize casting JSON to LF while holding the shared writer lock.
+ * Each live file is replaced atomically after recovery and pair validation.
+ */
+export function normalizeCastingJsonLineEndings(castingDir: string): string[] {
+  if (!existsSync(castingDir)) return [];
+  const release = acquireCastingRegistryLock(castingDir, 'casting JSON line-ending normalization');
+  try {
+    recoverCastingRegistryTransaction(castingDir);
+    readCastingRegistryPair(castingDir);
+
+    const normalized: string[] = [];
+    const transactionId = randomUUID();
+    const entries = readdirSync(castingDir, { withFileTypes: true })
+      .filter(entry => entry.isFile() && entry.name.endsWith('.json'))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const filePath = path.join(castingDir, entry.name);
+      const content = readText(filePath);
+      if (content === undefined || !content.includes('\r\n')) continue;
+      durableReplace(
+        filePath,
+        content.replace(/\r\n/g, '\n'),
+        'normalization',
+        transactionId,
+      );
+      normalized.push(entry.name);
+    }
+    return normalized;
+  } finally {
+    release();
+  }
+}
+
+/**
  * Create a missing pair or migrate a valid generationless legacy pair while
  * the caller holds the shared casting writer lock.
  */
@@ -1857,8 +1900,8 @@ export function validateCastingRegistryPairRaw(
     || historyTransaction !== manifest.transaction_id
     || historyRevision !== manifest.registry_revision
     || revision !== manifest.registry_revision
-    || sha256(registryRaw) !== manifest.registry_sha256
-    || sha256(historyRaw) !== manifest.history_sha256
+    || !matchesSha256(registryRaw, manifest.registry_sha256)
+    || !matchesSha256(historyRaw, manifest.history_sha256)
   ) {
     throw new Error(
       'Cannot read a consistent casting registry/history pair: registry/history bytes do not match the stable commit manifest',
@@ -1927,8 +1970,8 @@ export function readCastingRegistryPair(
       && historyTransaction === manifest.transaction_id
       && historyRevision === manifest.registry_revision
       && revision === manifest.registry_revision
-      && sha256(registryRaw) === manifest.registry_sha256
-      && sha256(historyRaw) === manifest.history_sha256
+      && matchesSha256(registryRaw, manifest.registry_sha256)
+      && matchesSha256(historyRaw, manifest.history_sha256)
     ) {
       return {
         registryRaw,
