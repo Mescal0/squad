@@ -18,6 +18,16 @@ const standalone = readFileSync(join(WORKFLOWS, 'squad-standalone-release.yml'),
 const npmPublish = readFileSync(join(WORKFLOWS, 'squad-npm-publish.yml'), 'utf8');
 const insiderPublish = readFileSync(join(WORKFLOWS, 'squad-insider-publish.yml'), 'utf8');
 const promote = readFileSync(join(WORKFLOWS, 'squad-promote.yml'), 'utf8');
+const ci = readFileSync(join(WORKFLOWS, 'squad-ci.yml'), 'utf8');
+const releaseVerify = readFileSync(join(WORKFLOWS, 'squad-release-verify.yml'), 'utf8');
+const buildStandalone = readFileSync(
+  join(process.cwd(), 'scripts', 'build-standalone.mjs'),
+  'utf8',
+);
+const nodeSecurityFloor = JSON.parse(readFileSync(
+  join(process.cwd(), 'scripts', 'release', 'node-security-floor.json'),
+  'utf8',
+));
 const verifyPublishEvidenceScript = readFileSync(
   join(process.cwd(), 'scripts', 'release', 'verify-publish-evidence.mjs'),
   'utf8',
@@ -316,10 +326,138 @@ describe('standalone release handoff', () => {
       expect(standaloneWorkflow.on?.workflow_call?.inputs).toHaveProperty(inputName);
       expect(standaloneWorkflow.on?.workflow_dispatch?.inputs).toHaveProperty(inputName);
     }
-    expect(standalone).toContain(
-      'ref: ${{ inputs.source_ref || inputs.release_tag || github.ref }}',
-    );
     expect(standaloneWorkflow.on?.release).toBeUndefined();
+  });
+
+  it('pins every standalone checkout and cross-job artifact to source_sha', () => {
+    for (const [jobName, job] of Object.entries(standaloneWorkflow.jobs)) {
+      const steps = job.steps ?? [];
+      for (const [index, step] of steps.entries()) {
+        if (!step.uses?.startsWith('actions/checkout@')) continue;
+        expect(step.with?.ref, `${jobName} checkout ref`).toBe('${{ inputs.source_sha }}');
+        const verify = steps[index + 1];
+        if (jobName === 'guard') {
+          const validate = stepNamed(job, 'Validate inputs').run ?? '';
+          expect(validate).toContain('head_sha="$(git rev-parse HEAD)"');
+          expect(validate).toContain('test "$head_sha" = "$SOURCE_SHA"');
+          expect(validate).toContain('echo "Verified checkout HEAD: ${head_sha}"');
+        } else {
+          expect(verify?.name, `${jobName} checkout verification`).toBe(
+            'Verify exact source checkout',
+          );
+          expect(verify?.run).toContain('test "${head_sha}" = "${SOURCE_SHA}"');
+        }
+      }
+    }
+
+    const build = standaloneWorkflow.jobs.build;
+    const upload = build.steps?.find((step) => step.uses?.startsWith('actions/upload-artifact@'));
+    expect(upload?.with?.name).toBe('squad-${{ matrix.target }}-${{ inputs.source_sha }}');
+    const executeBundle = stepNamed(build, 'Execute bundle and bounded bridge lifecycle smoke').run
+      ?? '';
+    expect(executeBundle).toContain('verified_head="$(git rev-parse HEAD)"');
+    expect(executeBundle).toContain('test "${verified_head}" = "${SOURCE_SHA}"');
+    expect(executeBundle).toContain('--source-sha "${verified_head}"');
+
+    const publishDownload = standaloneWorkflow.jobs.publish.steps?.find(
+      (step) => step.uses?.startsWith('actions/download-artifact@'),
+    );
+    expect(publishDownload?.with?.pattern).toBe('squad-*-${{ inputs.source_sha }}');
+
+    const checksumsUpload = standaloneWorkflow.jobs.publish.steps?.find(
+      (step) => step.uses?.startsWith('actions/upload-artifact@'),
+    );
+    expect(checksumsUpload?.with?.name).toBe(
+      'standalone-release-checksums-${{ inputs.source_sha }}',
+    );
+
+    const packagingDownload = standaloneWorkflow.jobs.packaging.steps?.find(
+      (step) => step.uses?.startsWith('actions/download-artifact@'),
+    );
+    expect(packagingDownload?.with?.name).toBe(
+      'standalone-release-checksums-${{ inputs.source_sha }}',
+    );
+
+    const packagingUpload = standaloneWorkflow.jobs.packaging.steps?.find(
+      (step) => step.uses?.startsWith('actions/upload-artifact@'),
+    );
+    expect(packagingUpload?.with?.name).toBe(
+      'packaging-manifests-${{ inputs.source_sha }}',
+    );
+
+    for (const jobName of ['publish-homebrew', 'publish-winget']) {
+      const download = standaloneWorkflow.jobs[jobName].steps?.find(
+        (step) => step.uses?.startsWith('actions/download-artifact@'),
+      );
+      expect(download?.with?.name, `${jobName} artifact`).toBe(
+        'packaging-manifests-${{ inputs.source_sha }}',
+      );
+    }
+  });
+
+  it('vendors the patched Node default and refuses versions below the security floor', () => {
+    expect(nodeSecurityFloor).toMatchObject({
+      advisory: 'https://nodejs.org/en/blog/vulnerability/october-2026-security-releases',
+      releaseNotes: 'https://github.com/nodejs/node/releases/tag/v22.23.4',
+      standaloneDefault: '22.23.4',
+      minimumByMajor: {
+        22: '22.23.4',
+        24: '24.22.1',
+        26: '26.12.1',
+      },
+    });
+    expect(standaloneWorkflow.on?.workflow_call?.inputs?.node_version?.default).toBe('22.23.4');
+    expect(standaloneWorkflow.on?.workflow_dispatch?.inputs?.node_version?.default).toBe('22.23.4');
+    expect(standaloneWorkflow.env?.NODE_VERSION).toBe("${{ inputs.node_version || '22.23.4' }}");
+    expect(stepNamed(standaloneWorkflow.jobs.guard, 'Validate inputs').run).toContain(
+      'node scripts/release/node-security-floor.mjs --version "$NODE_VERSION_INPUT"',
+    );
+  });
+
+  it('checksum-verifies every downloaded Node runtime and pins release-critical CI', () => {
+    expect(buildStandalone).toContain('SHASUMS256.txt');
+    expect(buildStandalone).toContain('SHASUMS256.txt.sig');
+    expect(buildStandalone).toContain('SHASUMS256.txt.asc');
+    expect(buildStandalone).toContain("createHash('sha256')");
+    expect(buildStandalone).toContain('Checksum mismatch for ${file}');
+    expect(buildStandalone).toContain('downloadVerifiedNodeArtifact(version, file, archivePath, stagingDir)');
+    expect(standalone).not.toMatch(/node-version:\s*22(?:\r?\n|$)/);
+    expect(standalone).toContain("node-version: '22.23.4'");
+    expect(releaseVerify).not.toMatch(/node-version:\s*22(?:\r?\n|$)/);
+    expect(releaseVerify).toContain("node-version: '22.23.4'");
+    expect(ci).not.toMatch(/node-version:\s*22(?:\r?\n|$)/);
+    expect(ci).toContain("node-version: '22.23.4'");
+  });
+
+  it('supports exact-SHA artifact-only validation without creating or requiring a release tag', () => {
+    const guard = stepNamed(standaloneWorkflow.jobs.guard, 'Validate inputs').run ?? '';
+    expect(guard).toContain('if [ "$UPLOAD" = true ]; then');
+    expect(guard).toContain('release_tag must be empty or a stable, preview, or insider tag');
+    expect(guard).toContain('Artifact-only validation: no tag or release publication will occur.');
+    expect(guard.indexOf('if [ "$UPLOAD" = true ]; then')).toBeLessThan(
+      guard.indexOf('assert-publish-identity.mjs'),
+    );
+    expect(standaloneWorkflow.jobs.publish.if).toBe('inputs.upload');
+  });
+
+  it('executes every bundle on a matching hosted runner and records lifecycle plus archive evidence', () => {
+    for (const [target, runner] of [
+      ['linux-x64', 'ubuntu-latest'],
+      ['linux-arm64', 'ubuntu-24.04-arm'],
+      ['darwin-x64', 'macos-15-intel'],
+      ['darwin-arm64', 'macos-15'],
+      ['win32-x64', 'windows-latest'],
+      ['win32-arm64', 'windows-11-arm'],
+    ]) {
+      expect(standalone).toMatch(
+        new RegExp(`target: ${target}[\\s\\S]*?runner: ${runner.replace('.', '\\.')}`),
+      );
+    }
+    expect(standalone).toContain('Execute bundle and bounded bridge lifecycle smoke');
+    expect(standalone).toContain('validate-standalone-bundle.mjs');
+    expect(standalone).toContain('state-backend-root-guard.test.ts');
+    expect(standalone).toContain('squad-${{ matrix.target }}-validation.json');
+    expect(standalone).not.toContain('cross-built, not executable here');
   });
 
   it('builds package workspaces without the release-tag-incompatible root prebuild', () => {
@@ -675,14 +813,14 @@ describe('automated package publication', () => {
 
     const packagingUpload = packaging.steps?.find(
       (step) => step.uses?.startsWith('actions/upload-artifact@')
-        && step.with?.name === 'packaging-manifests',
+        && step.with?.name === 'packaging-manifests-${{ inputs.source_sha }}',
     );
     expect(packagingUpload).toBeDefined();
     const checksumDownload = packaging.steps?.find(
       (step) => step.uses?.startsWith('actions/download-artifact@'),
     );
     expect(checksumDownload?.with).toMatchObject({
-      name: 'standalone-release-checksums',
+      name: 'standalone-release-checksums-${{ inputs.source_sha }}',
       path: 'release-metadata',
     });
     expect(stepNamed(packaging, 'Generate manifests').run).toContain(
@@ -693,7 +831,9 @@ describe('automated package publication', () => {
       const artifactDownload = job.steps?.find(
         (step) => step.uses?.startsWith('actions/download-artifact@'),
       );
-      expect(artifactDownload?.with?.name).toBe('packaging-manifests');
+      expect(artifactDownload?.with?.name).toBe(
+        'packaging-manifests-${{ inputs.source_sha }}',
+      );
       expect(serialized(job)).not.toContain('generate-packaging.mjs');
     }
 
@@ -721,7 +861,7 @@ describe('automated package publication', () => {
 
     const checksumUpload = publish.steps?.find(
       (step) => step.uses?.startsWith('actions/upload-artifact@')
-        && step.with?.name === 'standalone-release-checksums',
+        && step.with?.name === 'standalone-release-checksums-${{ inputs.source_sha }}',
     );
     expect(checksumUpload?.with?.path).toBe('artifacts/SHA256SUMS.txt');
   });
@@ -751,15 +891,12 @@ describe('automated package publication', () => {
     expect(winget.if).toBe('inputs.publish_package_managers');
   });
 
-  it('checks out packaging at the same explicit source ref as the build', () => {
-    const expectedRef =
-      '${{ inputs.source_ref || inputs.release_tag || github.ref }}';
-
+  it('checks out packaging and builds at the exact source SHA', () => {
     for (const jobName of ['build', 'packaging']) {
       const checkout = standaloneWorkflow.jobs[jobName].steps?.find((step) =>
         step.uses?.startsWith('actions/checkout@'),
       );
-      expect(checkout?.with?.ref, jobName).toBe(expectedRef);
+      expect(checkout?.with?.ref, jobName).toBe('${{ inputs.source_sha }}');
     }
   });
 
